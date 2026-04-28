@@ -20,8 +20,8 @@ the agent tool layer:
 
 ## Status
 
-Early MVP. This repo is now independent Python code with no `dim-sdk`, Node,
-or pnpm dependency.
+Early MVP. This repo is now independent Python code with no Node or pnpm
+dependency.
 
 Implemented:
 

@@ -20,7 +20,7 @@ PreCog 会直接返回提前执行好的结果。
 
 ## 状态
 
-早期 MVP。当前仓库已经是独立 Python 项目，不再依赖 `dim-sdk`、Node 或 pnpm。
+早期 MVP。当前仓库已经是独立 Python 项目，不再依赖 Node 或 pnpm。
 
 已实现：
 
