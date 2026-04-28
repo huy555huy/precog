@@ -1,5 +1,7 @@
 # PreCog
 
+[简体中文](README.zh-CN.md)
+
 Python-first speculative tool execution for agent runtimes.
 
 PreCog watches streamed model tool-call events. Once it sees a read-only tool
@@ -159,4 +161,3 @@ Replace `<you>` with your GitHub username or organization.
 ## License
 
 MIT
-
