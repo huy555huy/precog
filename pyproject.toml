@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "precog"
+version = "0.1.0"
+description = "Python-first speculative tool execution for agent runtimes."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "huy" }]
+keywords = ["agents", "speculative-execution", "tool-calling", "latency"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/huy/precog"
+Repository = "https://github.com/huy/precog"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
