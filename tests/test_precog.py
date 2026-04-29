@@ -28,6 +28,7 @@ from precog.adapters.langchain import PreCogLangChainCallbackHandler
 from precog.adapters.anthropic import (
     AnthropicMessagesClient,
     AnthropicMessagesAdapter,
+    AnthropicStreamAccumulator,
     execute_message_tool_calls,
     extract_tool_uses,
     tool_result_block,
@@ -573,6 +574,114 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             client.messages_create(messages=[], max_tokens=1)
 
         self.assertEqual(seen["user_agent"], "precog/0.6.0")
+
+    def test_anthropic_stream_accumulator_builds_tool_message(self) -> None:
+        accumulator = AnthropicStreamAccumulator()
+        for event in [
+            {
+                "type": "message_start",
+                "message": {"type": "message", "role": "assistant", "content": []},
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Checking"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "search",
+                    "input": {},
+                },
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '{"q":'},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '"x"}'},
+            },
+            {
+                "type": "content_block_stop",
+                "index": 1,
+            },
+            {"type": "message_delta", "delta": {}},
+        ]:
+            accumulator.add(event)
+
+        message = accumulator.final_message()
+
+        self.assertEqual(message["stop_reason"], "tool_use")
+        self.assertEqual(message["content"][0]["text"], "Checking")
+        self.assertEqual(message["content"][1]["input"], {"q": "x"})
+
+    async def test_anthropic_streaming_client_invokes_event_handler(self) -> None:
+        class Response:
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def __iter__(self) -> Any:
+                events = [
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                        },
+                    },
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "pong"},
+                    },
+                    {"type": "content_block_stop", "index": 0},
+                    {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+                    {"type": "message_stop"},
+                ]
+                for event in events:
+                    yield f"data: {json.dumps(event)}\n".encode()
+                    yield b"\n"
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event["type"])
+
+        seen: list[str] = []
+        client = AnthropicMessagesClient(
+            base_url="https://relay.example",
+            auth_token="test-token",
+            model="test-model",
+        )
+
+        with patch("precog.adapters.anthropic.request.urlopen", return_value=Response()):
+            message = await client.messages_create_streaming(
+                on_event=on_event,
+                messages=[],
+                max_tokens=1,
+            )
+
+        self.assertEqual(message["content"][0]["text"], "pong")
+        self.assertIn("message_stop", seen)
 
     async def test_anthropic_tool_call_helper_executes_and_formats_results(self) -> None:
         message = {

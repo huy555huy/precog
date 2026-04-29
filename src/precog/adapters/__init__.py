@@ -3,6 +3,7 @@
 from .anthropic import (
     AnthropicMessagesAdapter,
     AnthropicMessagesClient,
+    AnthropicStreamAccumulator,
     AnthropicToolUse,
     execute_message_tool_calls,
     extract_tool_uses,
@@ -23,6 +24,7 @@ __all__ = [
     "OpenAIFunctionCall",
     "AnthropicMessagesAdapter",
     "AnthropicMessagesClient",
+    "AnthropicStreamAccumulator",
     "AnthropicToolUse",
     "OpenAIResponsesAdapter",
     "PreCogLangChainCallbackHandler",

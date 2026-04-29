@@ -38,6 +38,11 @@ instead of just a benchmark toy.
   PreCog's generic streamed-args events.
   Sources: [Anthropic tool use](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use),
   [Anthropic streaming messages](https://docs.anthropic.com/claude/reference/messages-streaming).
+- Anthropic's fine-grained tool streaming documents the exact accumulation
+  contract for `input_json_delta`: initialize an input buffer on
+  `content_block_start`, append `partial_json`, then parse it at
+  `content_block_stop`. PreCog's stdlib streaming client follows this pattern.
+  Source: [Anthropic fine-grained tool streaming](https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming).
 
 ## What The Research Suggests
 
@@ -47,6 +52,16 @@ instead of just a benchmark toy.
   is that speculation should be pattern-aware and policy-gated, not a blind
   always-on firehose.
   Source: [arXiv:2603.18897](https://arxiv.org/abs/2603.18897).
+- AgentBench frames agent evaluation as interactive multi-turn environments,
+  which is a better fit for PreCog than one-shot function-call tests.
+  Source: [AgentBench](https://arxiv.org/abs/2308.03688).
+- Tau-bench emphasizes tool-agent-user interaction plus rule-following
+  reliability. PreCog's live bench borrows that idea by scoring final answers
+  against expected facts while tracking tool-layer savings.
+  Source: [tau-bench](https://arxiv.org/abs/2406.12045).
+- SWE-bench's useful product lesson is reproducibility: keep the harness and
+  generated reports in predictable locations so benchmark claims can be rerun.
+  Source: [SWE-bench](https://www.swebench.com/SWE-bench/).
 
 ## Product Requirements Derived From This
 

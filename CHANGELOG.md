@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0
+
+- Add a stdlib Anthropic streaming client that accumulates SSE events into a
+  final Messages response while forwarding events to PreCog.
+- Add a live `examples/agent_bench.py` harness with pass/fail scoring,
+  tool-call counts, cache hits, shadow hits, speculation counts, and Markdown
+  reports.
+- Document a real relay-backed agent benchmark in the README.
+- Harden streaming tool-use handling for relays that omit `stop_reason`.
+
 ## 0.6.0
 
 - Add Anthropic/Claude Messages adapter for `tool_use` / `tool_result` loops.

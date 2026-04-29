@@ -34,7 +34,7 @@ Alpha runtime。当前仓库是独立 Python 项目，不依赖 Node 或 pnpm。
 - 命中率过低时自适应暂停新的推测
 - 进行中推测数量上限，避免抢占真实工具调用资源
 - 本地 `ToolRegistry`，可以直接注册和执行真实 Python 函数
-- 可选 OpenAI Responses 与 LangGraph 适配器
+- 可选 OpenAI Responses、Anthropic Messages 与 LangGraph 适配器
 - JSONL trace 与 predictor 状态持久化
 - 分阶段 rollout：shadow、memoize-only、full speculation
 - Prometheus 风格指标和一个小 CLI
@@ -42,7 +42,7 @@ Alpha runtime。当前仓库是独立 Python 项目，不依赖 Node 或 pnpm。
 - 更完整的运行时统计：resolved、cancelled、wasted、paused
 - 异步推测执行器
 - `before_execute` / `after_execute` 集成钩子
-- smoke demo、合成 benchmark 和 unittest 测试套件
+- smoke demo、合成 benchmark、真实 agent benchmark 和 unittest 测试套件
 
 ## 安装
 
@@ -59,6 +59,7 @@ PYTHONPATH=src python demo/registry_quickstart.py
 PYTHONPATH=src python demo/openai_responses_loop.py
 PYTHONPATH=src python demo/anthropic_messages_loop.py
 PYTHONPATH=src python demo/benchmark.py
+PYTHONPATH=src python examples/agent_bench.py --dry-run --task-limit 1
 ```
 
 包里也带了一个很小的 CLI：
@@ -248,6 +249,26 @@ stdlib 客户端默认发送 `User-Agent: precog/0.6.0`，因为部分中转网�
 Python urllib 的默认请求特征。如果你的网关要求特定客户端标识，可以用
 `ANTHROPIC_USER_AGENT` 覆盖。
 
+如果要接 streaming，把事件先喂给 `AnthropicMessagesAdapter`，再执行完整的
+tool call：
+
+```python
+from precog.adapters.anthropic import AnthropicMessagesAdapter
+
+adapter = AnthropicMessagesAdapter()
+
+async def on_event(event):
+    for model_event in adapter.events_from(event):
+        await precog.observe_model_event(model_event)
+
+response = await client.messages_create_streaming(
+    on_event=on_event,
+    max_tokens=768,
+    tools=registry.anthropic_tools(),
+    messages=messages,
+)
+```
+
 ## 运维
 
 ```python
@@ -294,21 +315,38 @@ precog = PreCog(
 
 ## Benchmark
 
-demo benchmark 模拟了 12 次工具调用，每次调用都有模型流式输出时间、后续思考
-时间和真实工具延迟：
+现在有两个 harness：
 
 ```bash
 PYTHONPATH=src python demo/benchmark.py
+PYTHONPATH=src python examples/agent_bench.py --modes all --task-limit 2
 ```
 
-它会比较三种模式：
+`demo/benchmark.py` 是便宜、确定性的合成测试，模拟 12 次工具调用、模型流式
+输出时间、后续思考时间和真实工具延迟。
 
-1. 不启用 PreCog 的 baseline
-2. 只使用 memoization 的缓存命中
-3. memoization 加流式阶段的推测执行
+`examples/agent_bench.py` 是真实 Claude/Anthropic-compatible tool agent：
+它通过 Messages API 跑客服/运营类任务，把 streaming tool-use 事件喂给 PreCog，
+执行本地 Python 工具，给最终答案打 pass/fail，并在 `reports/` 下写 JSON/MD
+报告。
 
-具体数字会受到机器和事件循环调度影响，但整体形态应该是：当只读工具调用重复
-或可以被提前执行时，真实工具执行次数减少，总 wall time 下降。
+这个 live bench 的形态参考了
+[AgentBench](https://arxiv.org/abs/2308.03688) 的多轮交互环境、
+[tau-bench](https://arxiv.org/abs/2406.12045) 的工具 agent 可靠性思路，
+以及 [SWE-bench](https://www.swebench.com/SWE-bench/) 的可复现 harness 思路。
+
+2026-04-29 用中转跑的一次样例：2 个任务，每个本地工具模拟 600ms 延迟。
+
+| mode | pass | wall ms | tool calls | tool exec | cache hits | shadow hits | spec resolved | saved ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 2/2 | 16687 | 4 | 4 | 0 | 0 | 0 | 0 |
+| observe | 2/2 | 17737 | 4 | 4 | 0 | 2 | 0 | 0 |
+| memoize | 2/2 | 24868 | 4 | 2 | 2 | 0 | 0 | 1209 |
+| speculate | 2/2 | 17302 | 4 | 2 | 4 | 0 | 2 | 2422 |
+
+小样本端到端 wall time 会被模型延迟抖动盖住，所以更稳定的信号是工具层：
+memoize/speculate 把真实工具执行从 4 次降到 2 次；streaming speculation 成功
+提前完成了 2 次首个工具调用，并在真正工具 runner 到达时直接命中。
 
 ## 推到 GitHub
 

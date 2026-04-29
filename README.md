@@ -35,7 +35,7 @@ Implemented:
 - adaptive pause when cache hit-rate drops too low
 - max in-flight speculation throttling
 - local `ToolRegistry` for real Python functions
-- optional OpenAI Responses and LangGraph adapters
+- optional OpenAI Responses, Anthropic Messages, and LangGraph adapters
 - JSONL tracing and predictor state persistence
 - staged rollout modes for shadow, memoize-only, and full speculation
 - Prometheus-style metrics and a small CLI
@@ -43,7 +43,7 @@ Implemented:
 - richer runtime stats for resolved, cancelled, wasted, and paused work
 - async speculative executor
 - `before_execute` / `after_execute` integration hooks
-- smoke demo, synthetic benchmark, and unittest suite
+- smoke demo, synthetic benchmark, live agent benchmark, and unittest suite
 
 ## Install
 
@@ -60,6 +60,7 @@ PYTHONPATH=src python demo/registry_quickstart.py
 PYTHONPATH=src python demo/openai_responses_loop.py
 PYTHONPATH=src python demo/anthropic_messages_loop.py
 PYTHONPATH=src python demo/benchmark.py
+PYTHONPATH=src python examples/agent_bench.py --dry-run --task-limit 1
 ```
 
 The package also ships a tiny CLI:
@@ -261,6 +262,26 @@ The stdlib client sends `User-Agent: precog/0.6.0` by default because some
 relay gateways reject Python's default urllib signature. Override it with
 `ANTHROPIC_USER_AGENT` if your gateway requires a specific client identity.
 
+For streaming integrations, use `messages_create_streaming` and forward events
+through `AnthropicMessagesAdapter` before executing completed tool calls:
+
+```python
+from precog.adapters.anthropic import AnthropicMessagesAdapter
+
+adapter = AnthropicMessagesAdapter()
+
+async def on_event(event):
+    for model_event in adapter.events_from(event):
+        await precog.observe_model_event(model_event)
+
+response = await client.messages_create_streaming(
+    on_event=on_event,
+    max_tokens=768,
+    tools=registry.anthropic_tools(),
+    messages=messages,
+)
+```
+
 ## Operations
 
 ```python
@@ -308,22 +329,40 @@ tools will miss the cache and execute normally.
 
 ## Benchmark
 
-The demo benchmark models 12 tool calls with streamed model time, post-stream
-thinking time, and real tool latency:
+There are two harnesses:
 
 ```bash
 PYTHONPATH=src python demo/benchmark.py
+PYTHONPATH=src python examples/agent_bench.py --modes all --task-limit 2
 ```
 
-It compares:
+`demo/benchmark.py` is deterministic and cheap. It models 12 tool calls with
+streamed model time, post-stream thinking time, and real tool latency.
 
-1. baseline with no PreCog
-2. memoization-only cache hits
-3. memoization plus in-stream speculative execution
+`examples/agent_bench.py` is a live Claude/Anthropic-compatible tool agent. It
+runs support-ops tasks through the Messages API, streams tool-use events into
+PreCog, executes local Python tools, scores final answers, and writes JSON/MD
+reports under `reports/`.
 
-The exact numbers depend on your machine and event loop timing, but the shape
-should show fewer real tool executions and lower wall time once read-only calls
-repeat or can be pre-run.
+The live bench borrows its shape from
+[AgentBench](https://arxiv.org/abs/2308.03688) for multi-turn interaction,
+[tau-bench](https://arxiv.org/abs/2406.12045) for tool-agent reliability, and
+[SWE-bench](https://www.swebench.com/SWE-bench/) for reproducible harnesses.
+
+Sample relay-backed run on 2026-04-29 with 2 tasks and 600ms simulated tool
+latency:
+
+| mode | pass | wall ms | tool calls | tool exec | cache hits | shadow hits | spec resolved | saved ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 2/2 | 16687 | 4 | 4 | 0 | 0 | 0 | 0 |
+| observe | 2/2 | 17737 | 4 | 4 | 0 | 2 | 0 | 0 |
+| memoize | 2/2 | 24868 | 4 | 2 | 2 | 0 | 0 | 1209 |
+| speculate | 2/2 | 17302 | 4 | 2 | 4 | 0 | 2 | 2422 |
+
+End-to-end wall time is noisy because model latency dominates small runs. The
+more stable signal is the tool layer: memoize/speculate cut real tool executions
+from 4 to 2, and streaming speculation resolved both first tool calls before the
+authoritative tool runner needed them.
 
 ## GitHub
 
