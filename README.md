@@ -58,6 +58,7 @@ PYTHONPATH=src python -m unittest discover -s tests
 PYTHONPATH=src python demo/smoke.py
 PYTHONPATH=src python demo/registry_quickstart.py
 PYTHONPATH=src python demo/openai_responses_loop.py
+PYTHONPATH=src python demo/anthropic_messages_loop.py
 PYTHONPATH=src python demo/benchmark.py
 ```
 
@@ -232,6 +233,29 @@ callbacks = [PreCogLangChainCallbackHandler(precog)]
 LangChain callbacks are observational, so they train the predictor and memoize
 tool results but cannot skip execution. Use the LangGraph wrapper when you need
 cache hits to short-circuit tool calls.
+
+### Anthropic / Claude Messages
+
+```python
+from precog.adapters.anthropic import execute_message_tool_calls
+
+response = client.messages.create(
+    model="claude-sonnet-4-5",
+    max_tokens=768,
+    tools=registry.anthropic_tools(),
+    messages=[{"role": "user", "content": "Check order ord_100 twice."}],
+)
+
+tool_results = await execute_message_tool_calls(precog, response, registry.execute)
+messages.append({"role": "user", "content": tool_results})
+```
+
+For a real API smoke test, set `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`, then run:
+
+```bash
+PYTHONPATH=src python examples/eval_anthropic_messages.py --mode all --task-limit 1
+```
 
 ## Operations
 

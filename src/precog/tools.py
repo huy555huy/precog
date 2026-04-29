@@ -93,6 +93,16 @@ class ToolRegistry:
     def responses_tools(self) -> list[dict[str, Any]]:
         return self.openai_tools()
 
+    def anthropic_tools(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": spec.name,
+                "description": spec.description or "",
+                "input_schema": _function_parameters_schema(spec.func),
+            }
+            for spec in self._tools.values()
+        ]
+
     async def execute(self, tool_name: str, args: Mapping[str, Any]) -> Any:
         spec = self.get(tool_name)
 

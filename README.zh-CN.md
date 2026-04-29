@@ -57,6 +57,7 @@ PYTHONPATH=src python -m unittest discover -s tests
 PYTHONPATH=src python demo/smoke.py
 PYTHONPATH=src python demo/registry_quickstart.py
 PYTHONPATH=src python demo/openai_responses_loop.py
+PYTHONPATH=src python demo/anthropic_messages_loop.py
 PYTHONPATH=src python demo/benchmark.py
 ```
 
@@ -219,6 +220,29 @@ callbacks = [PreCogLangChainCallbackHandler(precog)]
 
 LangChain callback 是观测型接口，所以它可以训练 predictor、memoize 工具结果，
 但不能跳过工具执行。需要 cache hit 直接短路工具调用时，用 LangGraph wrapper。
+
+### Anthropic / Claude Messages
+
+```python
+from precog.adapters.anthropic import execute_message_tool_calls
+
+response = client.messages.create(
+    model="claude-sonnet-4-5",
+    max_tokens=768,
+    tools=registry.anthropic_tools(),
+    messages=[{"role": "user", "content": "Check order ord_100 twice."}],
+)
+
+tool_results = await execute_message_tool_calls(precog, response, registry.execute)
+messages.append({"role": "user", "content": tool_results})
+```
+
+如果要跑真实 API smoke test，设置 `ANTHROPIC_BASE_URL` 和
+`ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY`，然后运行：
+
+```bash
+PYTHONPATH=src python examples/eval_anthropic_messages.py --mode all --task-limit 1
+```
 
 ## 运维
 

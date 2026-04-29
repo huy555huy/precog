@@ -23,6 +23,12 @@ from precog import (
 )
 from precog.adapters.langgraph import make_langgraph_tool_wrappers
 from precog.adapters.langchain import PreCogLangChainCallbackHandler
+from precog.adapters.anthropic import (
+    AnthropicMessagesAdapter,
+    execute_message_tool_calls,
+    extract_tool_uses,
+    tool_result_block,
+)
 from precog.adapters.openai import (
     OpenAIResponsesAdapter,
     execute_response_tool_calls,
@@ -336,6 +342,21 @@ class PreCogTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+        self.assertEqual(
+            registry.anthropic_tools(),
+            [
+                {
+                    "name": "search",
+                    "description": "Search indexed docs.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}},
+                        "required": ["q"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        )
 
     async def test_predictor_state_can_round_trip_to_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -471,6 +492,76 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[1].delta, '{"q":')
         self.assertEqual(events[2].delta, '"x"}')
         self.assertEqual(events[3].type, "tool_call_end")
+
+    async def test_anthropic_messages_adapter_translates_streaming_tool_events(
+        self,
+    ) -> None:
+        adapter = AnthropicMessagesAdapter()
+        started = adapter.events_from(
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "search",
+                    "input": {},
+                },
+            }
+        )
+        delta = adapter.events_from(
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '{"q":"x"}'},
+            }
+        )
+        stopped = adapter.events_from({"type": "content_block_stop", "index": 1})
+
+        events = started + delta + stopped
+        self.assertEqual(events[0].type, "tool_call_start")
+        self.assertEqual(events[0].call_id, "toolu_1")
+        self.assertEqual(events[0].tool_name, "search")
+        self.assertEqual(events[1].delta, '{"q":"x"}')
+        self.assertEqual(events[2].type, "tool_call_end")
+
+    async def test_anthropic_tool_call_helper_executes_and_formats_results(self) -> None:
+        message = {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "search",
+                    "input": {"q": "x"},
+                }
+            ]
+        }
+
+        async def runner(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+            return {"tool": tool_name, "args": dict(args)}
+
+        precog = PreCog(read_only_tools={"search"})
+        uses = extract_tool_uses(message)
+        blocks = await execute_message_tool_calls(precog, message, runner)
+
+        self.assertEqual(uses[0].name, "search")
+        self.assertEqual(uses[0].input, {"q": "x"})
+        self.assertEqual(
+            blocks,
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": '{"tool": "search", "args": {"q": "x"}}',
+                }
+            ],
+        )
+
+    async def test_anthropic_tool_result_block_preserves_string_outputs(self) -> None:
+        self.assertEqual(
+            tool_result_block("toolu_1", "plain"),
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "plain"},
+        )
 
     async def test_openai_response_tool_call_helper_executes_and_formats_outputs(
         self,

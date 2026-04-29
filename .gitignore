@@ -7,6 +7,7 @@ __pycache__/
 .coverage
 coverage/
 htmlcov/
+reports/
 
 .venv/
 venv/

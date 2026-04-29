@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+- Add Anthropic/Claude Messages adapter for `tool_use` / `tool_result` loops.
+- Add Anthropic streaming event translation for `input_json_delta` tool args.
+- Add `ToolRegistry.anthropic_tools()` schema generation.
+- Add Anthropic eval harness with baseline/observe/memoize/speculate modes.
+- Add Anthropic Messages demo and tests for tool-call extraction and results.
+
 ## 0.5.0
 
 - Add rollout modes: `off`, `observe`, `memoize`, and `speculate` for safer

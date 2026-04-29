@@ -32,6 +32,12 @@ instead of just a benchmark toy.
   callbacks are observational. They are useful for predictor training and
   memoization, not for skipping execution.
   Source: [LangChain AsyncCallbackHandler](https://reference.langchain.com/python/langchain-core/callbacks/base/AsyncCallbackHandler).
+- Anthropic Messages uses `tool_use` content blocks from the assistant and
+  `tool_result` content blocks in the immediately following user message. In
+  streaming mode, tool inputs arrive through `input_json_delta`, which maps to
+  PreCog's generic streamed-args events.
+  Sources: [Anthropic tool use](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use),
+  [Anthropic streaming messages](https://docs.anthropic.com/claude/reference/messages-streaming).
 
 ## What The Research Suggests
 
