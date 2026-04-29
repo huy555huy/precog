@@ -244,6 +244,10 @@ messages.append({"role": "user", "content": tool_results})
 PYTHONPATH=src python examples/eval_anthropic_messages.py --mode all --task-limit 1
 ```
 
+stdlib 客户端默认发送 `User-Agent: precog/0.6.0`，因为部分中转网关会拒绝
+Python urllib 的默认请求特征。如果你的网关要求特定客户端标识，可以用
+`ANTHROPIC_USER_AGENT` 覆盖。
+
 ## 运维
 
 ```python

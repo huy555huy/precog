@@ -257,6 +257,10 @@ For a real API smoke test, set `ANTHROPIC_BASE_URL` and
 PYTHONPATH=src python examples/eval_anthropic_messages.py --mode all --task-limit 1
 ```
 
+The stdlib client sends `User-Agent: precog/0.6.0` by default because some
+relay gateways reject Python's default urllib signature. Override it with
+`ANTHROPIC_USER_AGENT` if your gateway requires a specific client identity.
+
 ## Operations
 
 ```python

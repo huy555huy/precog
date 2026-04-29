@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import os
 from typing import Any, Awaitable, Callable, Mapping
-from urllib import request
+from urllib import error, request
 
 from ..runtime import ModelEvent, PreCog
 
@@ -91,6 +91,7 @@ class AnthropicMessagesClient:
         auth_token: str | None = None,
         model: str | None = None,
         timeout_seconds: float = 60.0,
+        user_agent: str | None = None,
     ) -> None:
         self.base_url = (base_url or os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
         self.auth_token = (
@@ -100,6 +101,7 @@ class AnthropicMessagesClient:
         )
         self.model = model or os.getenv("ANTHROPIC_MODEL") or "claude-sonnet-4-5"
         self.timeout_seconds = timeout_seconds
+        self.user_agent = user_agent or os.getenv("ANTHROPIC_USER_AGENT") or "precog/0.6.0"
         if not self.auth_token:
             raise RuntimeError(
                 "missing Anthropic credentials; set ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY"
@@ -115,13 +117,22 @@ class AnthropicMessagesClient:
             headers={
                 "content-type": "application/json",
                 "anthropic-version": "2023-06-01",
+                "user-agent": self.user_agent,
                 "x-api-key": self.auth_token or "",
                 "authorization": f"Bearer {self.auth_token}",
             },
             method="POST",
         )
-        with request.urlopen(req, timeout=self.timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            raise RuntimeError(
+                f"Anthropic Messages request failed: HTTP {exc.code} {exc.reason}: {detail}"
+            ) from exc
+        except error.URLError as exc:
+            raise RuntimeError(f"Anthropic Messages request failed: {exc.reason}") from exc
 
 
 def extract_tool_uses(message: Any) -> list[AnthropicToolUse]:

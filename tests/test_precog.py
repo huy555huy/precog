@@ -7,8 +7,10 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
-from io import StringIO
+from io import BytesIO, StringIO
 from typing import Any, Mapping
+from unittest.mock import patch
+from urllib.error import HTTPError
 from uuid import uuid4
 
 from precog import (
@@ -24,6 +26,7 @@ from precog import (
 from precog.adapters.langgraph import make_langgraph_tool_wrappers
 from precog.adapters.langchain import PreCogLangChainCallbackHandler
 from precog.adapters.anthropic import (
+    AnthropicMessagesClient,
     AnthropicMessagesAdapter,
     execute_message_tool_calls,
     extract_tool_uses,
@@ -524,6 +527,52 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0].tool_name, "search")
         self.assertEqual(events[1].delta, '{"q":"x"}')
         self.assertEqual(events[2].type, "tool_call_end")
+
+    def test_anthropic_client_reports_http_error_body(self) -> None:
+        client = AnthropicMessagesClient(
+            base_url="https://relay.example",
+            auth_token="test-token",
+            model="test-model",
+        )
+        http_error = HTTPError(
+            "https://relay.example/v1/messages",
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=BytesIO(b'{"error":"model not allowed"}'),
+        )
+
+        with patch("precog.adapters.anthropic.request.urlopen", side_effect=http_error):
+            with self.assertRaisesRegex(RuntimeError, "model not allowed"):
+                client.messages_create(messages=[], max_tokens=1)
+
+    def test_anthropic_client_sets_precog_user_agent(self) -> None:
+        seen: dict[str, Any] = {}
+
+        class Response:
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"content":[]}'
+
+        def fake_urlopen(req: Any, timeout: float) -> Response:
+            seen["user_agent"] = req.get_header("User-agent")
+            return Response()
+
+        client = AnthropicMessagesClient(
+            base_url="https://relay.example",
+            auth_token="test-token",
+            model="test-model",
+        )
+
+        with patch("precog.adapters.anthropic.request.urlopen", side_effect=fake_urlopen):
+            client.messages_create(messages=[], max_tokens=1)
+
+        self.assertEqual(seen["user_agent"], "precog/0.6.0")
 
     async def test_anthropic_tool_call_helper_executes_and_formats_results(self) -> None:
         message = {
