@@ -54,6 +54,7 @@ For local development without installing:
 PYTHONPATH=src python -m unittest discover -s tests
 PYTHONPATH=src python demo/smoke.py
 PYTHONPATH=src python demo/registry_quickstart.py
+PYTHONPATH=src python demo/openai_responses_loop.py
 PYTHONPATH=src python demo/benchmark.py
 ```
 
@@ -132,6 +133,12 @@ result = await precog.execute("search", {"q": "agent latency"}, registry.execute
 Sync tools are offloaded to a worker thread by default so speculative execution
 does not block the event loop.
 
+The same registry can generate OpenAI-compatible function tool definitions:
+
+```python
+tools = registry.openai_tools()
+```
+
 ## Runtime Controls
 
 The default settings are aggressive enough to show latency wins, but still keep
@@ -163,17 +170,21 @@ precog = PreCog(
 ### OpenAI Responses streaming
 
 ```python
-from precog.adapters.openai import OpenAIResponsesAdapter
+from precog.adapters.openai import OpenAIResponsesAdapter, execute_response_tool_calls
 
 adapter = OpenAIResponsesAdapter()
 
 for event in stream:
     for model_event in adapter.events_from(event):
         await precog.observe_model_event(model_event)
+
+tool_outputs = await execute_response_tool_calls(precog, response, registry.execute)
+next_input = [*response.output, *tool_outputs]
 ```
 
 The adapter translates function-call argument deltas into PreCog's generic
-`ModelEvent` shape.
+`ModelEvent` shape. `execute_response_tool_calls` runs completed function-call
+items and returns Responses-compatible `function_call_output` input items.
 
 ### LangGraph ToolNode
 
@@ -190,6 +201,18 @@ tool_node = ToolNode(
 The wrappers call `before_execute`; on a hit they return the cached ToolNode
 result without invoking the tool, otherwise they execute normally and memoize in
 `after_execute`.
+
+### LangChain callbacks
+
+```python
+from precog.adapters.langchain import PreCogLangChainCallbackHandler
+
+callbacks = [PreCogLangChainCallbackHandler(precog)]
+```
+
+LangChain callbacks are observational, so they train the predictor and memoize
+tool results but cannot skip execution. Use the LangGraph wrapper when you need
+cache hits to short-circuit tool calls.
 
 ## Operations
 

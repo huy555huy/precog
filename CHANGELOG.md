@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Add OpenAI Responses helpers to extract function calls, execute them through
+  PreCog, and emit `function_call_output` input items.
+- Add OpenAI-compatible tool schema generation from `ToolRegistry` function
+  signatures and docstrings.
+- Add LangChain callback observer for predictor training and memoization.
+- Expand tests for OpenAI response execution, function-call output formatting,
+  LangChain callback observation, and generated tool schemas.
+
 ## 0.3.0
 
 - Add `ToolRegistry` for real local Python tool execution with idempotency classes,

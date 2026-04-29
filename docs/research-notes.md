@@ -10,6 +10,11 @@ instead of just a benchmark toy.
   outputs back to the model. This maps directly to PreCog's `(tool, args)` cache
   key and `before_execute` / `after_execute` lifecycle.
   Source: [OpenAI Function calling](https://developers.openai.com/api/docs/guides/function-calling).
+- OpenAI Responses represents function-call outputs as input items with
+  `type="function_call_output"`, `call_id`, and `output`. This is why PreCog's
+  OpenAI helper returns output items rather than trying to call the model
+  itself.
+  Source: [OpenAI Responses API reference](https://platform.openai.com/docs/api-reference/responses).
 - OpenAI Responses streaming uses typed semantic events and includes function
   argument delta/done events. This gives PreCog an early signal before the
   final tool execution path.
@@ -23,6 +28,10 @@ instead of just a benchmark toy.
   Sources: [LangGraph ToolNode](https://reference.langchain.com/python/langgraph.prebuilt/tool_node/ToolNode),
   [ToolCallRequest](https://reference.langchain.com/python/langgraph.prebuilt/tool_node/ToolCallRequest),
   [ToolCallWrapper](https://reference.langchain.com/python/langgraph.prebuilt/tool_node/ToolCallWrapper).
+- LangChain callback handlers expose `on_tool_start` and `on_tool_end`, but
+  callbacks are observational. They are useful for predictor training and
+  memoization, not for skipping execution.
+  Source: [LangChain AsyncCallbackHandler](https://reference.langchain.com/python/langchain-core/callbacks/base/AsyncCallbackHandler).
 
 ## What The Research Suggests
 

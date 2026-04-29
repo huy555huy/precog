@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from typing import Any, Mapping
+from uuid import uuid4
 
 from precog import (
     IdempotencyClass,
@@ -19,7 +20,13 @@ from precog import (
     tokenize,
 )
 from precog.adapters.langgraph import make_langgraph_tool_wrappers
-from precog.adapters.openai import OpenAIResponsesAdapter
+from precog.adapters.langchain import PreCogLangChainCallbackHandler
+from precog.adapters.openai import (
+    OpenAIResponsesAdapter,
+    execute_response_tool_calls,
+    extract_function_calls,
+    function_call_output,
+)
 
 
 class CacheTests(unittest.TestCase):
@@ -249,6 +256,7 @@ class PreCogTests(unittest.IsolatedAsyncioTestCase):
 
         @registry.register(idempotency_class=IdempotencyClass.NETWORK_READ)
         def search(q: str) -> dict[str, str]:
+            """Search indexed docs."""
             return {"q": q}
 
         precog = PreCog(**registry.precog_kwargs())
@@ -257,6 +265,22 @@ class PreCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"q": "x"})
         self.assertEqual(registry.read_only_tools(), ("search",))
         self.assertEqual(search("y"), {"q": "y"})
+        self.assertEqual(
+            registry.openai_tools(),
+            [
+                {
+                    "type": "function",
+                    "name": "search",
+                    "description": "Search indexed docs.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}},
+                        "required": ["q"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        )
 
     async def test_predictor_state_can_round_trip_to_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -368,6 +392,47 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[2].delta, '"x"}')
         self.assertEqual(events[3].type, "tool_call_end")
 
+    async def test_openai_response_tool_call_helper_executes_and_formats_outputs(
+        self,
+    ) -> None:
+        response = {
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "search",
+                    "arguments": '{"q": "x"}',
+                }
+            ]
+        }
+
+        async def runner(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+            return {"tool": tool_name, "args": dict(args)}
+
+        precog = PreCog(read_only_tools={"search"})
+        calls = extract_function_calls(response)
+        outputs = await execute_response_tool_calls(precog, response, runner)
+
+        self.assertEqual(calls[0].name, "search")
+        self.assertEqual(calls[0].arguments, {"q": "x"})
+        self.assertEqual(
+            outputs,
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": '{"tool": "search", "args": {"q": "x"}}',
+                }
+            ],
+        )
+
+    async def test_openai_function_call_output_preserves_string_outputs(self) -> None:
+        self.assertEqual(
+            function_call_output("call_1", "plain"),
+            {"type": "function_call_output", "call_id": "call_1", "output": "plain"},
+        )
+
     async def test_langgraph_async_wrapper_caches_tool_messages(self) -> None:
         class Request:
             tool_call = {"name": "search", "args": {"q": "x"}, "id": "call-1"}
@@ -387,6 +452,27 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(executions, 1)
         self.assertEqual(one, two)
+
+    async def test_langchain_callback_observes_tool_results_without_cache_hit_stats(
+        self,
+    ) -> None:
+        precog = PreCog(read_only_tools={"search"})
+        handler = PreCogLangChainCallbackHandler(precog)
+        run_id = uuid4()
+
+        await handler.on_tool_start(
+            {"name": "search"},
+            '{"q": "x"}',
+            run_id=run_id,
+        )
+        await handler.on_tool_end({"result": "x"}, run_id=run_id)
+
+        decision = await precog.before_execute("search", {"q": "x"}, call_id="c2")
+
+        self.assertEqual(decision.type, "provide_result")
+        self.assertEqual(decision.result, {"result": "x"})
+        self.assertEqual(precog.config().stats.cache_hits, 1)
+        self.assertEqual(precog.config().stats.cache_misses, 0)
 
 
 if __name__ == "__main__":

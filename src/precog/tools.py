@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import inspect
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, get_type_hints
 
 from .idempotency import IdempotencyClass
 
@@ -16,6 +16,7 @@ class ToolSpec:
     name: str
     func: ToolFunction
     idempotency_class: IdempotencyClass = IdempotencyClass.UNKNOWN
+    description: str | None = None
     timeout_seconds: float | None = None
     run_sync_in_thread: bool = True
 
@@ -32,6 +33,7 @@ class ToolRegistry:
         *,
         name: str | None = None,
         idempotency_class: IdempotencyClass | str = IdempotencyClass.UNKNOWN,
+        description: str | None = None,
         timeout_seconds: float | None = None,
         run_sync_in_thread: bool = True,
     ) -> ToolFunction | Callable[[ToolFunction], ToolFunction]:
@@ -41,6 +43,7 @@ class ToolRegistry:
                 name=tool_name,
                 func=inner,
                 idempotency_class=IdempotencyClass(idempotency_class),
+                description=description or inspect.getdoc(inner),
                 timeout_seconds=timeout_seconds,
                 run_sync_in_thread=run_sync_in_thread,
             )
@@ -76,6 +79,20 @@ class ToolRegistry:
             "executor": self.execute,
         }
 
+    def openai_tools(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "name": spec.name,
+                "description": spec.description or "",
+                "parameters": _function_parameters_schema(spec.func),
+            }
+            for spec in self._tools.values()
+        ]
+
+    def responses_tools(self) -> list[dict[str, Any]]:
+        return self.openai_tools()
+
     async def execute(self, tool_name: str, args: Mapping[str, Any]) -> Any:
         spec = self.get(tool_name)
 
@@ -90,3 +107,49 @@ class ToolRegistry:
             return await run()
         return await asyncio.wait_for(run(), timeout=spec.timeout_seconds)
 
+
+def _function_parameters_schema(func: ToolFunction) -> dict[str, Any]:
+    signature = inspect.signature(func)
+    hints = get_type_hints(func)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+
+    for name, parameter in signature.parameters.items():
+        if parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            continue
+        properties[name] = _annotation_schema(hints.get(name, parameter.annotation))
+        if parameter.default is inspect.Parameter.empty:
+            required.append(name)
+
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+def _annotation_schema(annotation: Any) -> dict[str, Any]:
+    if annotation is inspect.Parameter.empty:
+        return {"type": "string"}
+    origin = getattr(annotation, "__origin__", None)
+    if origin in {list, tuple, set}:
+        return {"type": "array"}
+    if origin is dict:
+        return {"type": "object"}
+    if annotation is str:
+        return {"type": "string"}
+    if annotation is int:
+        return {"type": "integer"}
+    if annotation is float:
+        return {"type": "number"}
+    if annotation is bool:
+        return {"type": "boolean"}
+    if annotation in {dict, Mapping}:
+        return {"type": "object"}
+    if annotation in {list, tuple, set}:
+        return {"type": "array"}
+    return {"type": "string"}

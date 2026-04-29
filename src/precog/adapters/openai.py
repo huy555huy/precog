@@ -1,8 +1,21 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from dataclasses import dataclass
+import json
+from typing import Any, Awaitable, Callable, Mapping
 
-from ..runtime import ModelEvent
+from ..runtime import ModelEvent, PreCog
+
+
+ToolRunner = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
+
+
+@dataclass(frozen=True)
+class OpenAIFunctionCall:
+    name: str
+    arguments: dict[str, Any]
+    call_id: str
+    item_id: str | None = None
 
 
 class OpenAIResponsesAdapter:
@@ -92,6 +105,67 @@ def events_from_openai_response_event(event: Any) -> list[ModelEvent]:
     return OpenAIResponsesAdapter().events_from(event)
 
 
+def extract_function_calls(response_or_items: Any) -> list[OpenAIFunctionCall]:
+    """Extract function calls from an OpenAI Responses object or output list."""
+
+    items = _get(response_or_items, "output")
+    if items is None:
+        items = response_or_items
+    calls: list[OpenAIFunctionCall] = []
+    for item in list(items or []):
+        if _get(item, "type") != "function_call":
+            continue
+        name = _get(item, "name")
+        call_id = _get(item, "call_id")
+        raw_args = _get(item, "arguments", default="{}")
+        if not name or not call_id:
+            continue
+        if isinstance(raw_args, str):
+            args = json.loads(raw_args or "{}")
+        elif isinstance(raw_args, Mapping):
+            args = dict(raw_args)
+        else:
+            args = {}
+        if not isinstance(args, Mapping):
+            args = {}
+        calls.append(
+            OpenAIFunctionCall(
+                name=str(name),
+                arguments=dict(args),
+                call_id=str(call_id),
+                item_id=_maybe_str(_get(item, "id")),
+            )
+        )
+    return calls
+
+
+async def execute_response_tool_calls(
+    precog: PreCog,
+    response_or_items: Any,
+    runner: ToolRunner,
+) -> list[dict[str, Any]]:
+    """Execute OpenAI Responses function calls and return output input items."""
+
+    outputs: list[dict[str, Any]] = []
+    for call in extract_function_calls(response_or_items):
+        result = await precog.execute(
+            call.name,
+            call.arguments,
+            runner,
+            call_id=call.call_id,
+        )
+        outputs.append(function_call_output(call.call_id, result))
+    return outputs
+
+
+def function_call_output(call_id: str, output: Any) -> dict[str, Any]:
+    if isinstance(output, str):
+        encoded = output
+    else:
+        encoded = json.dumps(output, ensure_ascii=False, default=repr)
+    return {"type": "function_call_output", "call_id": call_id, "output": encoded}
+
+
 def _get(obj: Any, *path: str, default: Any = None) -> Any:
     current = obj
     for key in path:
@@ -103,3 +177,6 @@ def _get(obj: Any, *path: str, default: Any = None) -> Any:
             return default
     return current
 
+
+def _maybe_str(value: Any) -> str | None:
+    return str(value) if value is not None else None

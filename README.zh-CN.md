@@ -53,6 +53,7 @@ python -m pip install -e .
 PYTHONPATH=src python -m unittest discover -s tests
 PYTHONPATH=src python demo/smoke.py
 PYTHONPATH=src python demo/registry_quickstart.py
+PYTHONPATH=src python demo/openai_responses_loop.py
 PYTHONPATH=src python demo/benchmark.py
 ```
 
@@ -129,6 +130,12 @@ result = await precog.execute("search", {"q": "agent latency"}, registry.execute
 
 同步函数默认会放进 worker thread 执行，避免推测执行阻塞事件循环。
 
+同一个 registry 还能生成 OpenAI-compatible function tool 定义：
+
+```python
+tools = registry.openai_tools()
+```
+
 ## 运行时控制
 
 默认配置足够激进，可以更早抢跑工具调用，同时保留保护栏：
@@ -155,16 +162,21 @@ precog = PreCog(
 ### OpenAI Responses streaming
 
 ```python
-from precog.adapters.openai import OpenAIResponsesAdapter
+from precog.adapters.openai import OpenAIResponsesAdapter, execute_response_tool_calls
 
 adapter = OpenAIResponsesAdapter()
 
 for event in stream:
     for model_event in adapter.events_from(event):
         await precog.observe_model_event(model_event)
+
+tool_outputs = await execute_response_tool_calls(precog, response, registry.execute)
+next_input = [*response.output, *tool_outputs]
 ```
 
 这个适配器会把 function-call 参数流转换成 PreCog 的通用 `ModelEvent`。
+`execute_response_tool_calls` 会执行已完成的 function-call item，并返回
+Responses-compatible 的 `function_call_output` 输入项。
 
 ### LangGraph ToolNode
 
@@ -180,6 +192,17 @@ tool_node = ToolNode(
 
 wrapper 会先调用 `before_execute`，命中时直接返回缓存的 ToolNode 结果；
 未命中时正常执行工具，并在 `after_execute` 中写入缓存。
+
+### LangChain callbacks
+
+```python
+from precog.adapters.langchain import PreCogLangChainCallbackHandler
+
+callbacks = [PreCogLangChainCallbackHandler(precog)]
+```
+
+LangChain callback 是观测型接口，所以它可以训练 predictor、memoize 工具结果，
+但不能跳过工具执行。需要 cache hit 直接短路工具调用时，用 LangGraph wrapper。
 
 ## 运维
 
