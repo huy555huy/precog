@@ -48,13 +48,18 @@ class ToolCallPredictor:
         del records[: max(0, len(records) - self.args_window)]
 
     def guess_next(self, previous: str) -> str | None:
+        guessed = self.guess_next_with_confidence(previous)
+        return guessed[0] if guessed is not None else None
+
+    def guess_next_with_confidence(self, previous: str) -> tuple[str, float] | None:
         row = self._bigrams.get(previous)
         if not row:
             return None
         total = sum(row.values())
         if total < self.min_observations:
             return None
-        return max(row.items(), key=lambda item: item[1])[0]
+        name, count = max(row.items(), key=lambda item: item[1])
+        return name, count / total
 
     def guess_args(self, tool_name: str) -> Mapping[str, Any] | None:
         records = self._args_memory.get(tool_name)

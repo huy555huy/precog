@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0
+
+- Add rollout modes: `off`, `observe`, `memoize`, and `speculate` for safer
+  staged adoption.
+- Add shadow-hit accounting for observe-mode rollouts.
+- Add Prometheus-style metrics export through `PreCog.metrics_text()`.
+- Persist JSON-serializable cache entries in state files with remaining TTL.
+- Add `python -m precog` CLI commands: `doctor`, `metrics`, and `inspect-state`.
+- Add next-tool confidence threshold support for cross-turn speculation.
+- Expand tests to cover rollout modes, state/cache restore, metrics, and CLI.
+
 ## 0.4.0
 
 - Add OpenAI Responses helpers to extract function calls, execute them through

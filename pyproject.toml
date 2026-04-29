@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "precog"
-version = "0.4.0"
+version = "0.5.0"
 description = "Python-first speculative tool execution for agent runtimes."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,9 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = []
+
+[project.scripts]
+precog = "precog.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/huy555huy/precog"

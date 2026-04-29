@@ -17,6 +17,7 @@ from .trace import TraceSink
 
 
 SpeculativeExecutor = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
+RuntimeMode = Literal["off", "observe", "memoize", "speculate"]
 
 
 @dataclass(frozen=True)
@@ -50,8 +51,10 @@ class PreCogConfig:
     cache_ttl_seconds: float
     cache_max_entries: int
     read_only_tools: tuple[str, ...]
+    rollout_mode: RuntimeMode
     speculative_execution: bool
     fuzzy_threshold: float
+    min_next_tool_confidence: float
     predict_on_tool_start: bool
     adaptive_min_calls: int
     adaptive_min_hit_rate: float
@@ -89,6 +92,8 @@ class PreCog:
         min_observations: int = 1,
         args_window: int = 8,
         fuzzy_threshold: float = 0.7,
+        rollout_mode: RuntimeMode = "speculate",
+        min_next_tool_confidence: float = 0.0,
         predict_on_tool_start: bool = True,
         adaptive_min_calls: int = 20,
         adaptive_min_hit_rate: float = 0.2,
@@ -100,6 +105,10 @@ class PreCog:
     ) -> None:
         if not 0 <= fuzzy_threshold <= 1:
             raise ValueError("fuzzy_threshold must be between 0 and 1")
+        if rollout_mode not in {"off", "observe", "memoize", "speculate"}:
+            raise ValueError("rollout_mode must be off, observe, memoize, or speculate")
+        if not 0 <= min_next_tool_confidence <= 1:
+            raise ValueError("min_next_tool_confidence must be between 0 and 1")
         if adaptive_min_calls < 0:
             raise ValueError("adaptive_min_calls must be >= 0")
         if not 0 <= adaptive_min_hit_rate <= 1:
@@ -126,6 +135,8 @@ class PreCog:
         )
         self.stats = StatsCollector()
         self.fuzzy_threshold = fuzzy_threshold
+        self.rollout_mode = rollout_mode
+        self.min_next_tool_confidence = min_next_tool_confidence
         self.predict_on_tool_start = predict_on_tool_start
         self.adaptive_min_calls = adaptive_min_calls
         self.adaptive_min_hit_rate = adaptive_min_hit_rate
@@ -147,6 +158,9 @@ class PreCog:
         Dict events may use either Python names (``call_id``/``tool_name``) or
         common JS hook names (``callId``/``toolName``).
         """
+
+        if self.rollout_mode == "off":
+            return
 
         event_type = _event_value(event, "type")
         call_id = _event_value(event, "call_id", "callId")
@@ -211,6 +225,9 @@ class PreCog:
     ) -> PreCogDecision:
         """Return cached speculative result when available, otherwise allow."""
 
+        if self.rollout_mode == "off":
+            return PreCogDecision(type="allow")
+
         call_id = call_id or str(uuid4())
         normalized_args = dict(args)
         key = cache_key(tool_name, normalized_args)
@@ -224,15 +241,21 @@ class PreCog:
             strict = self.cache.peek_key(key)
             if strict is not None:
                 self.stats.bump("strict_hits")
-                self.stats.bump("cache_hits")
-                self.stats.bump("latency_saved_ms", strict.observed_latency_ms)
+                if self._can_provide_cached_result():
+                    self.stats.bump("cache_hits")
+                    self.stats.bump("latency_saved_ms", strict.observed_latency_ms)
+                else:
+                    self.stats.bump("shadow_hits")
                 self._log(
                     f"cache HIT strict call_id={call_id} tool={tool_name} "
                     f"saved~={strict.observed_latency_ms:.0f}ms"
                 )
                 self._maybe_pause_speculation()
                 self._observe_and_cross_predict(tool_name, normalized_args)
-                return PreCogDecision(type="provide_result", result=strict.result)
+                if self._can_provide_cached_result():
+                    return PreCogDecision(type="provide_result", result=strict.result)
+                self._inflight_start[call_id] = time.monotonic()
+                return PreCogDecision(type="allow")
 
             if self.fuzzy_threshold < 1:
                 fuzzy = self.cache.fuzzy_find(
@@ -243,15 +266,21 @@ class PreCog:
                 if fuzzy is not None:
                     entry, similarity = fuzzy
                     self.stats.bump("fuzzy_hits")
-                    self.stats.bump("cache_hits")
-                    self.stats.bump("latency_saved_ms", entry.observed_latency_ms)
+                    if self._can_provide_cached_result():
+                        self.stats.bump("cache_hits")
+                        self.stats.bump("latency_saved_ms", entry.observed_latency_ms)
+                    else:
+                        self.stats.bump("shadow_hits")
                     self._log(
                         f"cache HIT fuzzy={similarity:.2f} call_id={call_id} "
                         f"tool={tool_name} saved~={entry.observed_latency_ms:.0f}ms"
                     )
                     self._maybe_pause_speculation()
                     self._observe_and_cross_predict(tool_name, normalized_args)
-                    return PreCogDecision(type="provide_result", result=entry.result)
+                    if self._can_provide_cached_result():
+                        return PreCogDecision(type="provide_result", result=entry.result)
+                    self._inflight_start[call_id] = time.monotonic()
+                    return PreCogDecision(type="allow")
 
         self.stats.bump("cache_misses")
         self._inflight_start[call_id] = time.monotonic()
@@ -269,6 +298,9 @@ class PreCog:
         is_error: bool = False,
     ) -> None:
         """Observe a completed real tool execution and memoize safe results."""
+
+        if self.rollout_mode == "off":
+            return
 
         normalized_args = dict(args)
         elapsed_ms = 0.0
@@ -319,8 +351,10 @@ class PreCog:
             cache_ttl_seconds=self.cache.ttl_seconds,
             cache_max_entries=self.cache.max_entries,
             read_only_tools=self.idempotency.safe_tool_names(),
+            rollout_mode=self.rollout_mode,
             speculative_execution=self.executor is not None,
             fuzzy_threshold=self.fuzzy_threshold,
+            min_next_tool_confidence=self.min_next_tool_confidence,
             predict_on_tool_start=self.predict_on_tool_start,
             adaptive_min_calls=self.adaptive_min_calls,
             adaptive_min_hit_rate=self.adaptive_min_hit_rate,
@@ -336,12 +370,15 @@ class PreCog:
         return asdict(self.config())
 
     def export_state(self) -> dict[str, Any]:
-        return {"predictor": self.predictor.to_dict()}
+        return {"predictor": self.predictor.to_dict(), "cache": self.cache.to_dict()}
 
     def import_state(self, state: Mapping[str, Any]) -> None:
         predictor_state = state.get("predictor")
         if isinstance(predictor_state, Mapping):
             self.predictor.load_dict(predictor_state)
+        cache_state = state.get("cache")
+        if isinstance(cache_state, Mapping):
+            self.cache.load_dict(cache_state)
 
     def save_state(self, path: str | Path) -> None:
         Path(path).write_text(
@@ -351,6 +388,15 @@ class PreCog:
 
     def load_state(self, path: str | Path) -> None:
         self.import_state(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    def save_cache(self, path: str | Path) -> None:
+        self.cache.save(path)
+
+    def load_cache(self, path: str | Path) -> None:
+        self.cache.load(path)
+
+    def metrics_text(self, prefix: str = "precog") -> str:
+        return self.stats.prometheus_text(prefix)
 
     async def drain(self) -> None:
         tasks = list(self._inflight_speculations.values())
@@ -372,8 +418,11 @@ class PreCog:
         if self.idempotency.is_safe_for_speculation(tool_name):
             self.predictor.observe_args(tool_name, args)
 
-        next_tool = self.predictor.guess_next(tool_name)
-        if next_tool is None:
+        guessed = self.predictor.guess_next_with_confidence(tool_name)
+        if guessed is None:
+            return
+        next_tool, confidence = guessed
+        if confidence < self.min_next_tool_confidence:
             return
         if not self.idempotency.is_safe_for_speculation(next_tool):
             return
@@ -391,6 +440,8 @@ class PreCog:
         call_id: str | None = None,
     ) -> None:
         if self.executor is None:
+            return
+        if self.rollout_mode != "speculate":
             return
         if not self.idempotency.is_safe_for_speculation(tool_name):
             return
@@ -486,6 +537,9 @@ class PreCog:
 
     def _is_speculation_paused(self) -> bool:
         return time.monotonic() < self._speculation_paused_until
+
+    def _can_provide_cached_result(self) -> bool:
+        return self.rollout_mode in {"memoize", "speculate"}
 
     def _maybe_pause_speculation(self) -> None:
         if self.adaptive_min_calls == 0:

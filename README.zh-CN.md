@@ -36,6 +36,9 @@ Alpha runtime。当前仓库是独立 Python 项目，不依赖 Node 或 pnpm。
 - 本地 `ToolRegistry`，可以直接注册和执行真实 Python 函数
 - 可选 OpenAI Responses 与 LangGraph 适配器
 - JSONL trace 与 predictor 状态持久化
+- 分阶段 rollout：shadow、memoize-only、full speculation
+- Prometheus 风格指标和一个小 CLI
+- 可选 JSON cache 持久化，用于可序列化的工具结果
 - 更完整的运行时统计：resolved、cancelled、wasted、paused
 - 异步推测执行器
 - `before_execute` / `after_execute` 集成钩子
@@ -55,6 +58,14 @@ PYTHONPATH=src python demo/smoke.py
 PYTHONPATH=src python demo/registry_quickstart.py
 PYTHONPATH=src python demo/openai_responses_loop.py
 PYTHONPATH=src python demo/benchmark.py
+```
+
+包里也带了一个很小的 CLI：
+
+```bash
+PYTHONPATH=src python -m precog doctor
+PYTHONPATH=src python -m precog metrics
+PYTHONPATH=src python -m precog inspect-state precog-state.json
 ```
 
 ## 快速开始
@@ -144,6 +155,8 @@ tools = registry.openai_tools()
 precog = PreCog(
     read_only_tools={"search", "fetch_url"},
     executor=tool_executor,
+    rollout_mode="speculate",
+    min_next_tool_confidence=0.5,
     predict_on_tool_start=True,
     adaptive_min_calls=20,
     adaptive_min_hit_rate=0.2,
@@ -153,6 +166,9 @@ precog = PreCog(
 ```
 
 - `predict_on_tool_start` 会在模型刚输出工具名时就开始推测，参数使用该工具最近一次观察到的参数。
+- `rollout_mode` 支持分阶段上线：`off` 完全关闭，`observe` 只记录 shadow hit
+  不返回缓存，`memoize` 只返回缓存不做推测执行，`speculate` 开启完整运行时。
+- `min_next_tool_confidence` 会在 predictor 不够确定时阻止 cross-turn 推测。
 - 如果后续流式参数与猜测参数不一致，错误的进行中任务会被取消，并计入 wasted speculation。
 - 自适应保护会在观测命中率低于 `adaptive_min_hit_rate` 时临时暂停新的推测。
 - `max_concurrent_speculations` 限制同时进行的推测任务数量，避免无限抢占资源。
@@ -216,6 +232,9 @@ precog = PreCog(
 
 precog.save_state("precog-state.json")
 precog.load_state("precog-state.json")
+precog.save_cache("precog-cache.json")
+precog.load_cache("precog-cache.json")
+print(precog.metrics_text())
 await precog.close(cancel=True)
 ```
 

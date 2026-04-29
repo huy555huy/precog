@@ -8,6 +8,7 @@ from .runtime import (
     PreCog,
     PreCogConfig,
     PreCogDecision,
+    RuntimeMode,
     SpeculativeExecutor,
     ToolCall,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "PreCogConfig",
     "PreCogDecision",
     "PreCogStats",
+    "RuntimeMode",
     "SpeculationCache",
     "SpeculativeExecutor",
     "StatsCollector",

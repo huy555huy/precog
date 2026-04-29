@@ -17,6 +17,7 @@ StatsKey = Literal[
     "strict_hits",
     "fuzzy_hits",
     "cache_hits",
+    "shadow_hits",
     "cache_misses",
     "wasted_speculations",
     "adaptive_pauses",
@@ -38,6 +39,7 @@ class PreCogStats:
     strict_hits: int = 0
     fuzzy_hits: int = 0
     cache_hits: int = 0
+    shadow_hits: int = 0
     cache_misses: int = 0
     wasted_speculations: int = 0
     adaptive_pauses: int = 0
@@ -57,3 +59,13 @@ class StatsCollector:
     def hit_rate(self) -> float:
         total = self.stats.cache_hits + self.stats.cache_misses
         return 0.0 if total == 0 else self.stats.cache_hits / total
+
+    def prometheus_text(self, prefix: str = "precog") -> str:
+        lines: list[str] = []
+        for key, value in asdict(self.stats).items():
+            metric = f"{prefix}_{key}"
+            lines.append(f"# TYPE {metric} counter")
+            lines.append(f"{metric} {float(value)}")
+        lines.append(f"# TYPE {prefix}_hit_rate gauge")
+        lines.append(f"{prefix}_hit_rate {self.hit_rate()}")
+        return "\n".join(lines) + "\n"

@@ -6,6 +6,8 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -27,6 +29,7 @@ from precog.adapters.openai import (
     extract_function_calls,
     function_call_output,
 )
+from precog.__main__ import main as precog_cli
 
 
 class CacheTests(unittest.TestCase):
@@ -251,6 +254,58 @@ class PreCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executions, 1)
         self.assertEqual(one, two)
 
+    async def test_observe_mode_records_shadow_hits_without_short_circuiting(self) -> None:
+        executions = 0
+
+        async def runner(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+            nonlocal executions
+            executions += 1
+            return {"tool": tool_name, "args": dict(args), "execution": executions}
+
+        precog = PreCog(read_only_tools={"search"}, rollout_mode="observe")
+        one = await precog.execute("search", {"q": "x"}, runner, call_id="c1")
+        two = await precog.execute("search", {"q": "x"}, runner, call_id="c2")
+
+        self.assertEqual(executions, 2)
+        self.assertNotEqual(one, two)
+        self.assertEqual(precog.config().stats.shadow_hits, 1)
+        self.assertEqual(precog.config().stats.cache_hits, 0)
+
+    async def test_memoize_mode_uses_cache_without_launching_speculation(self) -> None:
+        async def executor(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+            return {"from": "spec", "tool": tool_name, "args": dict(args)}
+
+        precog = PreCog(
+            read_only_tools={"search"},
+            executor=executor,
+            rollout_mode="memoize",
+        )
+        args = {"q": "x"}
+        await precog.observe_model_event(
+            {"type": "tool_call_start", "callId": "c1", "toolName": "search"}
+        )
+        await precog.observe_model_event(
+            {"type": "tool_call_args_delta", "callId": "c1", "delta": json.dumps(args)}
+        )
+        await precog.observe_model_event({"type": "tool_call_end", "callId": "c1"})
+
+        await precog.before_execute("search", args, call_id="c1")
+        await precog.after_execute("search", args, {"real": True}, call_id="c1")
+        decision = await precog.before_execute("search", args, call_id="c2")
+
+        self.assertEqual(decision.type, "provide_result")
+        self.assertEqual(decision.result, {"real": True})
+        self.assertEqual(precog.config().stats.speculations_launched, 0)
+
+    async def test_off_mode_leaves_calls_untouched(self) -> None:
+        precog = PreCog(read_only_tools={"search"}, rollout_mode="off")
+        decision = await precog.before_execute("search", {"q": "x"}, call_id="c1")
+        await precog.after_execute("search", {"q": "x"}, {"result": "x"}, call_id="c1")
+
+        self.assertEqual(decision.type, "allow")
+        self.assertEqual(precog.config().cache_size, 0)
+        self.assertEqual(precog.config().stats.cache_misses, 0)
+
     async def test_tool_registry_executes_registered_tools(self) -> None:
         registry = ToolRegistry()
 
@@ -294,6 +349,31 @@ class PreCogTests(unittest.IsolatedAsyncioTestCase):
             two.load_state(path)
 
             self.assertEqual(two.predictor.guess_args("search"), {"q": "persist"})
+
+    async def test_state_round_trip_persists_json_cache_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "precog-state.json"
+            one = PreCog(read_only_tools={"search"})
+            await one.before_execute("search", {"q": "persist"}, call_id="c1")
+            await one.after_execute("search", {"q": "persist"}, {"ok": True}, call_id="c1")
+            one.save_state(path)
+
+            two = PreCog(read_only_tools={"search"})
+            two.load_state(path)
+            decision = await two.before_execute("search", {"q": "persist"}, call_id="c2")
+
+            self.assertEqual(decision.type, "provide_result")
+            self.assertEqual(decision.result, {"ok": True})
+
+    async def test_metrics_text_exports_prometheus_style_stats(self) -> None:
+        precog = PreCog(read_only_tools={"search"})
+        await precog.before_execute("search", {"q": "x"}, call_id="c1")
+
+        metrics = precog.metrics_text()
+
+        self.assertIn("# TYPE precog_cache_misses counter", metrics)
+        self.assertIn("precog_cache_misses 1.0", metrics)
+        self.assertIn("precog_hit_rate", metrics)
 
     async def test_max_concurrent_speculations_throttles_launches(self) -> None:
         async def executor(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -473,6 +553,51 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.result, {"result": "x"})
         self.assertEqual(precog.config().stats.cache_hits, 1)
         self.assertEqual(precog.config().stats.cache_misses, 0)
+
+
+class CliTests(unittest.TestCase):
+    def test_doctor_cli_prints_json(self) -> None:
+        out = StringIO()
+        with redirect_stdout(out):
+            code = precog_cli(["doctor"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(code, 0)
+        self.assertIn("python", payload)
+        self.assertIn("precog", payload)
+
+    def test_metrics_cli_prints_prometheus_text(self) -> None:
+        out = StringIO()
+        with redirect_stdout(out):
+            code = precog_cli(["metrics"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("precog_hit_rate", out.getvalue())
+
+    def test_inspect_state_cli_summarizes_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "predictor": {
+                            "args_memory": {"search": []},
+                            "bigrams": {"search": {"fetch": 1}},
+                        },
+                        "cache": {"entries": [{"tool_name": "search"}]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                code = precog_cli(["inspect-state", str(path)])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["args_memory_tools"], 1)
+        self.assertEqual(payload["bigram_sources"], 1)
+        self.assertEqual(payload["cache_entries"], 1)
 
 
 if __name__ == "__main__":

@@ -37,6 +37,9 @@ Implemented:
 - local `ToolRegistry` for real Python functions
 - optional OpenAI Responses and LangGraph adapters
 - JSONL tracing and predictor state persistence
+- staged rollout modes for shadow, memoize-only, and full speculation
+- Prometheus-style metrics and a small CLI
+- optional JSON cache persistence for serializable tool results
 - richer runtime stats for resolved, cancelled, wasted, and paused work
 - async speculative executor
 - `before_execute` / `after_execute` integration hooks
@@ -56,6 +59,14 @@ PYTHONPATH=src python demo/smoke.py
 PYTHONPATH=src python demo/registry_quickstart.py
 PYTHONPATH=src python demo/openai_responses_loop.py
 PYTHONPATH=src python demo/benchmark.py
+```
+
+The package also ships a tiny CLI:
+
+```bash
+PYTHONPATH=src python -m precog doctor
+PYTHONPATH=src python -m precog metrics
+PYTHONPATH=src python -m precog inspect-state precog-state.json
 ```
 
 ## Quickstart
@@ -148,6 +159,8 @@ guardrails on:
 precog = PreCog(
     read_only_tools={"search", "fetch_url"},
     executor=tool_executor,
+    rollout_mode="speculate",
+    min_next_tool_confidence=0.5,
     predict_on_tool_start=True,
     adaptive_min_calls=20,
     adaptive_min_hit_rate=0.2,
@@ -158,6 +171,12 @@ precog = PreCog(
 
 - `predict_on_tool_start` starts speculation as soon as the model names a tool,
   using that tool's most recently observed arguments.
+- `rollout_mode` supports staged adoption:
+  `off` disables PreCog, `observe` records shadow hits without returning cached
+  results, `memoize` returns cache hits without speculative execution, and
+  `speculate` enables the full runtime.
+- `min_next_tool_confidence` gates cross-turn speculation when the predictor is
+  uncertain.
 - if streamed arguments later disagree with the guessed args, the wrong
   in-flight task is cancelled and counted as wasted speculation.
 - the adaptive guard pauses new speculation temporarily when the observed
@@ -226,6 +245,9 @@ precog = PreCog(
 
 precog.save_state("precog-state.json")
 precog.load_state("precog-state.json")
+precog.save_cache("precog-cache.json")
+precog.load_cache("precog-cache.json")
+print(precog.metrics_text())
 await precog.close(cancel=True)
 ```
 

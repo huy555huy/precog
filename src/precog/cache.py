@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import re
 import time
 from typing import Any, Iterable, Mapping
@@ -153,6 +154,81 @@ class SpeculationCache:
     def clear(self) -> None:
         self._store.clear()
 
+    def to_dict(self) -> dict[str, Any]:
+        entries: list[dict[str, Any]] = []
+        monotonic_now = time.monotonic()
+        saved_at = time.time()
+        for entry in list(self._store.values()):
+            if self._is_expired(entry):
+                continue
+            age_seconds = monotonic_now - entry.inserted_at
+            remaining_ttl_seconds = max(0.0, self.ttl_seconds - age_seconds)
+            try:
+                json.dumps(entry.result)
+            except TypeError:
+                continue
+            entries.append(
+                {
+                    "tool_name": entry.tool_name,
+                    "args": dict(entry.args),
+                    "result": entry.result,
+                    "saved_at": saved_at,
+                    "remaining_ttl_seconds": remaining_ttl_seconds,
+                    "observed_latency_ms": entry.observed_latency_ms,
+                }
+            )
+        return {
+            "max_entries": self.max_entries,
+            "ttl_seconds": self.ttl_seconds,
+            "entries": entries,
+        }
+
+    def load_dict(self, state: Mapping[str, Any]) -> None:
+        for item in list(state.get("entries", [])):
+            if not isinstance(item, Mapping):
+                continue
+            tool_name = item.get("tool_name")
+            args = item.get("args")
+            if not isinstance(tool_name, str) or not isinstance(args, Mapping):
+                continue
+            saved_at = float(item.get("saved_at", time.time()))
+            remaining_ttl_seconds = item.get("remaining_ttl_seconds")
+            if remaining_ttl_seconds is None:
+                age_seconds = float(item.get("age_seconds", 0.0))
+            else:
+                elapsed_since_save = max(0.0, time.time() - saved_at)
+                remaining = float(remaining_ttl_seconds) - elapsed_since_save
+                if remaining <= 0:
+                    continue
+                age_seconds = self.ttl_seconds - remaining
+            if age_seconds > self.ttl_seconds:
+                continue
+            key = self.set(
+                tool_name,
+                dict(args),
+                item.get("result"),
+                observed_latency_ms=float(item.get("observed_latency_ms", 0.0)),
+            )
+            entry = self._store[key]
+            self._store[key] = CacheEntry(
+                key=entry.key,
+                tool_name=entry.tool_name,
+                args=entry.args,
+                arg_tokens=entry.arg_tokens,
+                result=entry.result,
+                inserted_at=time.monotonic() - max(0.0, age_seconds),
+                observed_latency_ms=entry.observed_latency_ms,
+            )
+
+    def save(self, path: str | Path) -> None:
+        Path(path).write_text(
+            json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def load(self, path: str | Path) -> None:
+        self.load_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+
     def _is_expired(self, entry: CacheEntry) -> bool:
         return time.monotonic() - entry.inserted_at > self.ttl_seconds
 
@@ -160,4 +236,3 @@ class SpeculationCache:
         expired = [key for key, entry in self._store.items() if self._is_expired(entry)]
         for key in expired:
             self._store.pop(key, None)
-
