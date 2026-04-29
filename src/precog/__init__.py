@@ -12,6 +12,8 @@ from .runtime import (
     ToolCall,
 )
 from .stats import PreCogStats, StatsCollector
+from .tools import ToolRegistry, ToolSpec
+from .trace import JsonlTraceSink, TraceSink
 
 __all__ = [
     "CacheEntry",
@@ -27,8 +29,11 @@ __all__ = [
     "StatsCollector",
     "ToolCall",
     "ToolCallPredictor",
+    "ToolRegistry",
+    "ToolSpec",
+    "JsonlTraceSink",
+    "TraceSink",
     "cache_key",
     "jaccard",
     "tokenize",
 ]
-

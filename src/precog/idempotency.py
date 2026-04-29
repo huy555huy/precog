@@ -38,3 +38,7 @@ class IdempotencyRegistry:
     def is_safe_for_speculation(self, tool_name: str) -> bool:
         return self.classify(tool_name) in SAFE_FOR_SPECULATION
 
+    def safe_tool_names(self) -> tuple[str, ...]:
+        return tuple(
+            name for name, cls in self._classes.items() if cls in SAFE_FOR_SPECULATION
+        )

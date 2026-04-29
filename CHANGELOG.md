@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+- Add `ToolRegistry` for real local Python tool execution with idempotency classes,
+  sync/async support, thread offloading, and per-tool timeouts.
+- Add optional LangGraph `ToolNode` wrappers for cache short-circuiting via
+  `wrap_tool_call` / `awrap_tool_call`.
+- Add OpenAI Responses streaming event adapter for function-call deltas.
+- Add JSONL tracing, predictor state save/load, graceful drain/close lifecycle,
+  and max in-flight speculation throttling.
+- Add research notes that tie the implementation to official framework hooks and
+  speculative-tool-execution papers.
+- Expand the test suite to cover registry execution, adapters, tracing,
+  persistence, and throttling.
+
 ## 0.2.0
 
 - Start speculation earlier at `tool_call_start` when recent args are available.

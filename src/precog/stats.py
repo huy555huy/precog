@@ -11,6 +11,8 @@ StatsKey = Literal[
     "cross_turn_speculations",
     "speculations_resolved",
     "speculations_cancelled",
+    "speculations_throttled",
+    "speculation_errors",
     "cache_stores",
     "strict_hits",
     "fuzzy_hits",
@@ -30,6 +32,8 @@ class PreCogStats:
     cross_turn_speculations: int = 0
     speculations_resolved: int = 0
     speculations_cancelled: int = 0
+    speculations_throttled: int = 0
+    speculation_errors: int = 0
     cache_stores: int = 0
     strict_hits: int = 0
     fuzzy_hits: int = 0

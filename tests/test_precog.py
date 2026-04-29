@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
+import tempfile
 import time
 import unittest
 from typing import Any, Mapping
 
-from precog import PreCog, SpeculationCache, cache_key, jaccard, tokenize
+from precog import (
+    IdempotencyClass,
+    JsonlTraceSink,
+    PreCog,
+    SpeculationCache,
+    ToolRegistry,
+    cache_key,
+    jaccard,
+    tokenize,
+)
+from precog.adapters.langgraph import make_langgraph_tool_wrappers
+from precog.adapters.openai import OpenAIResponsesAdapter
 
 
 class CacheTests(unittest.TestCase):
@@ -227,6 +240,150 @@ class PreCogTests(unittest.IsolatedAsyncioTestCase):
         precog = PreCog(read_only_tools={"search"})
         one = await precog.execute("search", {"q": "x"}, runner, call_id="c1")
         two = await precog.execute("search", {"q": "x"}, runner, call_id="c2")
+
+        self.assertEqual(executions, 1)
+        self.assertEqual(one, two)
+
+    async def test_tool_registry_executes_registered_tools(self) -> None:
+        registry = ToolRegistry()
+
+        @registry.register(idempotency_class=IdempotencyClass.NETWORK_READ)
+        def search(q: str) -> dict[str, str]:
+            return {"q": q}
+
+        precog = PreCog(**registry.precog_kwargs())
+        result = await precog.execute("search", {"q": "x"}, registry.execute)
+
+        self.assertEqual(result, {"q": "x"})
+        self.assertEqual(registry.read_only_tools(), ("search",))
+        self.assertEqual(search("y"), {"q": "y"})
+
+    async def test_predictor_state_can_round_trip_to_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "precog-state.json"
+            one = PreCog(read_only_tools={"search"})
+            await one.before_execute("search", {"q": "persist"}, call_id="c1")
+            await one.after_execute("search", {"q": "persist"}, {"ok": True}, call_id="c1")
+            one.save_state(path)
+
+            two = PreCog(read_only_tools={"search"})
+            two.load_state(path)
+
+            self.assertEqual(two.predictor.guess_args("search"), {"q": "persist"})
+
+    async def test_max_concurrent_speculations_throttles_launches(self) -> None:
+        async def executor(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+            await asyncio.sleep(0.02)
+            return {"tool": tool_name, "args": dict(args)}
+
+        precog = PreCog(
+            read_only_tools={"search"},
+            executor=executor,
+            max_concurrent_speculations=1,
+        )
+        await precog.observe_model_event(
+            {"type": "tool_call_start", "callId": "c1", "toolName": "search"}
+        )
+        await precog.observe_model_event(
+            {"type": "tool_call_args_delta", "callId": "c1", "delta": json.dumps({"q": "a"})}
+        )
+        await precog.observe_model_event({"type": "tool_call_end", "callId": "c1"})
+        await precog.observe_model_event(
+            {"type": "tool_call_start", "callId": "c2", "toolName": "search"}
+        )
+        await precog.observe_model_event(
+            {"type": "tool_call_args_delta", "callId": "c2", "delta": json.dumps({"q": "b"})}
+        )
+        await precog.observe_model_event({"type": "tool_call_end", "callId": "c2"})
+
+        await precog.drain()
+
+        self.assertEqual(precog.config().stats.speculations_launched, 1)
+        self.assertEqual(precog.config().stats.speculations_throttled, 1)
+
+    async def test_jsonl_trace_sink_records_speculation_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+
+            async def executor(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+                return {"tool": tool_name, "args": dict(args)}
+
+            precog = PreCog(
+                read_only_tools={"search"},
+                executor=executor,
+                trace_sink=JsonlTraceSink(path),
+            )
+            await precog.observe_model_event(
+                {"type": "tool_call_start", "callId": "c1", "toolName": "search"}
+            )
+            await precog.observe_model_event(
+                {
+                    "type": "tool_call_args_delta",
+                    "callId": "c1",
+                    "delta": json.dumps({"q": "x"}),
+                }
+            )
+            await precog.observe_model_event({"type": "tool_call_end", "callId": "c1"})
+            await precog.drain()
+
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any('"event": "speculation_launched"' in line for line in lines))
+            self.assertTrue(any('"event": "speculation_resolved"' in line for line in lines))
+
+
+class AdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_responses_adapter_translates_function_events(self) -> None:
+        adapter = OpenAIResponsesAdapter()
+        started = adapter.events_from(
+            {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "search",
+                },
+            }
+        )
+        delta = adapter.events_from(
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "delta": '{"q":',
+            }
+        )
+        done = adapter.events_from(
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_1",
+                "arguments": '"x"}',
+            }
+        )
+
+        events = started + delta + done
+        self.assertEqual(events[0].type, "tool_call_start")
+        self.assertEqual(events[0].call_id, "call_1")
+        self.assertEqual(events[0].tool_name, "search")
+        self.assertEqual(events[1].delta, '{"q":')
+        self.assertEqual(events[2].delta, '"x"}')
+        self.assertEqual(events[3].type, "tool_call_end")
+
+    async def test_langgraph_async_wrapper_caches_tool_messages(self) -> None:
+        class Request:
+            tool_call = {"name": "search", "args": {"q": "x"}, "id": "call-1"}
+
+        executions = 0
+
+        async def execute(request: Request) -> dict[str, Any]:
+            nonlocal executions
+            executions += 1
+            return {"content": "fresh", "tool_call_id": request.tool_call["id"]}
+
+        precog = PreCog(read_only_tools={"search"})
+        wrapper = make_langgraph_tool_wrappers(precog)["awrap_tool_call"]
+
+        one = await wrapper(Request(), execute)
+        two = await wrapper(Request(), execute)
 
         self.assertEqual(executions, 1)
         self.assertEqual(one, two)

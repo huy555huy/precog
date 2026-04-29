@@ -33,6 +33,10 @@ Implemented:
 - tool-name-stage speculation with guessed recent args
 - cancellation for wrong in-flight guesses
 - adaptive pause when cache hit-rate drops too low
+- max in-flight speculation throttling
+- local `ToolRegistry` for real Python functions
+- optional OpenAI Responses and LangGraph adapters
+- JSONL tracing and predictor state persistence
 - richer runtime stats for resolved, cancelled, wasted, and paused work
 - async speculative executor
 - `before_execute` / `after_execute` integration hooks
@@ -49,6 +53,7 @@ For local development without installing:
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests
 PYTHONPATH=src python demo/smoke.py
+PYTHONPATH=src python demo/registry_quickstart.py
 PYTHONPATH=src python demo/benchmark.py
 ```
 
@@ -105,6 +110,28 @@ convenience wrapper:
 result = await precog.execute("search", {"q": "python agents"}, tool_executor)
 ```
 
+## Real Tool Registry
+
+For a standalone Python app, use `ToolRegistry` as the dispatcher:
+
+```python
+from precog import IdempotencyClass, PreCog, ToolRegistry
+
+registry = ToolRegistry()
+
+
+@registry.register(idempotency_class=IdempotencyClass.NETWORK_READ, timeout_seconds=3)
+def search(q: str) -> dict[str, str]:
+    return {"query": q}
+
+
+precog = PreCog(**registry.precog_kwargs())
+result = await precog.execute("search", {"q": "agent latency"}, registry.execute)
+```
+
+Sync tools are offloaded to a worker thread by default so speculative execution
+does not block the event loop.
+
 ## Runtime Controls
 
 The default settings are aggressive enough to show latency wins, but still keep
@@ -118,6 +145,7 @@ precog = PreCog(
     adaptive_min_calls=20,
     adaptive_min_hit_rate=0.2,
     adaptive_cooldown_seconds=30,
+    max_concurrent_speculations=8,
 )
 ```
 
@@ -127,6 +155,59 @@ precog = PreCog(
   in-flight task is cancelled and counted as wasted speculation.
 - the adaptive guard pauses new speculation temporarily when the observed
   hit-rate falls below `adaptive_min_hit_rate`.
+- `max_concurrent_speculations` prevents speculation from stealing unlimited
+  resources from authoritative tool calls.
+
+## Integrations
+
+### OpenAI Responses streaming
+
+```python
+from precog.adapters.openai import OpenAIResponsesAdapter
+
+adapter = OpenAIResponsesAdapter()
+
+for event in stream:
+    for model_event in adapter.events_from(event):
+        await precog.observe_model_event(model_event)
+```
+
+The adapter translates function-call argument deltas into PreCog's generic
+`ModelEvent` shape.
+
+### LangGraph ToolNode
+
+```python
+from langgraph.prebuilt import ToolNode
+from precog.adapters.langgraph import make_langgraph_tool_wrappers
+
+tool_node = ToolNode(
+    tools,
+    **make_langgraph_tool_wrappers(precog),
+)
+```
+
+The wrappers call `before_execute`; on a hit they return the cached ToolNode
+result without invoking the tool, otherwise they execute normally and memoize in
+`after_execute`.
+
+## Operations
+
+```python
+from precog import JsonlTraceSink
+
+precog = PreCog(
+    **registry.precog_kwargs(),
+    trace_sink=JsonlTraceSink("logs/precog.jsonl"),
+)
+
+precog.save_state("precog-state.json")
+precog.load_state("precog-state.json")
+await precog.close(cancel=True)
+```
+
+See [research notes](docs/research-notes.md) for the official framework hooks
+and papers that shaped this version.
 
 ## Safety Model
 

@@ -62,6 +62,46 @@ class ToolCallPredictor:
             return None
         return deepcopy(dict(records[-1].args))
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "history_window": self.history_window,
+            "min_observations": self.min_observations,
+            "args_window": self.args_window,
+            "bigrams": deepcopy(self._bigrams),
+            "args_memory": {
+                tool_name: [
+                    {"args": deepcopy(dict(record.args)), "observed_at": record.observed_at}
+                    for record in records
+                ]
+                for tool_name, records in self._args_memory.items()
+            },
+            "last_tool": self._last_tool,
+        }
+
+    def load_dict(self, state: Mapping[str, Any]) -> None:
+        self._bigrams = {
+            str(previous): {str(name): int(count) for name, count in row.items()}
+            for previous, row in dict(state.get("bigrams", {})).items()
+            if isinstance(row, Mapping)
+        }
+        self._args_memory = {}
+        for tool_name, records in dict(state.get("args_memory", {})).items():
+            loaded: list[ArgsRecord] = []
+            if not isinstance(records, list):
+                continue
+            for record in records[-self.args_window :]:
+                if not isinstance(record, Mapping):
+                    continue
+                args = record.get("args")
+                if not isinstance(args, Mapping):
+                    continue
+                observed_at = float(record.get("observed_at", time.monotonic()))
+                loaded.append(ArgsRecord(args=deepcopy(dict(args)), observed_at=observed_at))
+            if loaded:
+                self._args_memory[str(tool_name)] = loaded
+        last_tool = state.get("last_tool")
+        self._last_tool = str(last_tool) if last_tool is not None else None
+
     def _trim(self, row: dict[str, int]) -> None:
         total = sum(row.values())
         if total <= self.history_window:
@@ -71,4 +111,3 @@ class ToolCallPredictor:
                 break
             row.pop(name, None)
             total -= count
-

@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import asdict, dataclass
 import inspect
 import json
+from pathlib import Path
 import time
 from typing import Any, Awaitable, Callable, Literal, Mapping
 from uuid import uuid4
@@ -12,6 +13,7 @@ from .cache import SpeculationCache, cache_key
 from .idempotency import IdempotencyClass, IdempotencyRegistry
 from .predictor import ToolCallPredictor
 from .stats import PreCogStats, StatsCollector
+from .trace import TraceSink
 
 
 SpeculativeExecutor = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
@@ -54,6 +56,7 @@ class PreCogConfig:
     adaptive_min_calls: int
     adaptive_min_hit_rate: float
     adaptive_cooldown_seconds: float
+    max_concurrent_speculations: int
     speculation_paused: bool
     stats: PreCogStats
     hit_rate: float
@@ -90,7 +93,9 @@ class PreCog:
         adaptive_min_calls: int = 20,
         adaptive_min_hit_rate: float = 0.2,
         adaptive_cooldown_seconds: float = 30.0,
+        max_concurrent_speculations: int = 8,
         executor: SpeculativeExecutor | None = None,
+        trace_sink: TraceSink | None = None,
         verbose: bool = False,
     ) -> None:
         if not 0 <= fuzzy_threshold <= 1:
@@ -101,6 +106,8 @@ class PreCog:
             raise ValueError("adaptive_min_hit_rate must be between 0 and 1")
         if adaptive_cooldown_seconds < 0:
             raise ValueError("adaptive_cooldown_seconds must be >= 0")
+        if max_concurrent_speculations < 1:
+            raise ValueError("max_concurrent_speculations must be >= 1")
 
         self.id = id
         self.read_only_tools = tuple(read_only_tools)
@@ -123,7 +130,9 @@ class PreCog:
         self.adaptive_min_calls = adaptive_min_calls
         self.adaptive_min_hit_rate = adaptive_min_hit_rate
         self.adaptive_cooldown_seconds = adaptive_cooldown_seconds
+        self.max_concurrent_speculations = max_concurrent_speculations
         self.executor = executor
+        self.trace_sink = trace_sink
         self.verbose = verbose
 
         self._args_buffer: dict[str, _ArgsBufferEntry] = {}
@@ -309,13 +318,14 @@ class PreCog:
             id=self.id,
             cache_ttl_seconds=self.cache.ttl_seconds,
             cache_max_entries=self.cache.max_entries,
-            read_only_tools=self.read_only_tools,
+            read_only_tools=self.idempotency.safe_tool_names(),
             speculative_execution=self.executor is not None,
             fuzzy_threshold=self.fuzzy_threshold,
             predict_on_tool_start=self.predict_on_tool_start,
             adaptive_min_calls=self.adaptive_min_calls,
             adaptive_min_hit_rate=self.adaptive_min_hit_rate,
             adaptive_cooldown_seconds=self.adaptive_cooldown_seconds,
+            max_concurrent_speculations=self.max_concurrent_speculations,
             speculation_paused=self._is_speculation_paused(),
             stats=self.stats.snapshot(),
             hit_rate=self.stats.hit_rate(),
@@ -324,6 +334,34 @@ class PreCog:
 
     def snapshot(self) -> dict[str, Any]:
         return asdict(self.config())
+
+    def export_state(self) -> dict[str, Any]:
+        return {"predictor": self.predictor.to_dict()}
+
+    def import_state(self, state: Mapping[str, Any]) -> None:
+        predictor_state = state.get("predictor")
+        if isinstance(predictor_state, Mapping):
+            self.predictor.load_dict(predictor_state)
+
+    def save_state(self, path: str | Path) -> None:
+        Path(path).write_text(
+            json.dumps(self.export_state(), ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def load_state(self, path: str | Path) -> None:
+        self.import_state(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    async def drain(self) -> None:
+        tasks = list(self._inflight_speculations.values())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def close(self, *, cancel: bool = False) -> None:
+        if cancel:
+            for task in list(self._inflight_speculations.values()):
+                task.cancel()
+        await self.drain()
 
     def _observe_and_cross_predict(
         self,
@@ -365,6 +403,15 @@ class PreCog:
             return
         if key in self._inflight_speculations:
             return
+        if len(self._inflight_speculations) >= self.max_concurrent_speculations:
+            self.stats.bump("speculations_throttled")
+            self._trace(
+                "speculation_throttled",
+                source=source,
+                tool_name=tool_name,
+                key=key,
+            )
+            return
 
         if source == "tool_start":
             self.stats.bump("tool_start_speculations")
@@ -374,6 +421,7 @@ class PreCog:
             self.stats.bump("cross_turn_speculations")
 
         self._log(f"spec LAUNCH source={source} tool={tool_name}")
+        self._trace("speculation_launched", source=source, tool_name=tool_name, key=key)
         task = asyncio.create_task(
             self._run_speculation(key, tool_name, normalized_args),
         )
@@ -402,12 +450,26 @@ class PreCog:
             )
             self.stats.bump("speculations_resolved")
             self._log(f"spec RESOLVED tool={tool_name} took={elapsed_ms:.0f}ms")
+            self._trace(
+                "speculation_resolved",
+                tool_name=tool_name,
+                key=key,
+                elapsed_ms=elapsed_ms,
+            )
         except asyncio.CancelledError:
             self.stats.bump("speculations_cancelled")
             self._log(f"spec CANCELLED tool={tool_name}")
+            self._trace("speculation_cancelled", tool_name=tool_name, key=key)
             raise
         except Exception as exc:  # pragma: no cover - defensive logging path.
+            self.stats.bump("speculation_errors")
             self._log(f"spec FAILED tool={tool_name} err={exc!r}")
+            self._trace(
+                "speculation_error",
+                tool_name=tool_name,
+                key=key,
+                error=repr(exc),
+            )
         finally:
             self._inflight_speculations.pop(key, None)
 
@@ -417,6 +479,7 @@ class PreCog:
             if key == actual_key:
                 continue
             self.stats.bump("wasted_speculations")
+            self._trace("speculation_wasted", key=key, actual_key=actual_key)
             task = self._inflight_speculations.get(key)
             if task is not None and not task.done():
                 task.cancel()
@@ -443,10 +506,19 @@ class PreCog:
                 f"hit_rate={self.stats.hit_rate():.2f} "
                 f"cooldown={self.adaptive_cooldown_seconds:.0f}s"
             )
+            self._trace(
+                "speculation_paused",
+                hit_rate=self.stats.hit_rate(),
+                cooldown_seconds=self.adaptive_cooldown_seconds,
+            )
 
     def _log(self, message: str) -> None:
         if self.verbose:
             print(f"[precog] {message}")
+
+    def _trace(self, event_type: str, **fields: Any) -> None:
+        if self.trace_sink is not None:
+            self.trace_sink.emit(event_type, runtime_id=self.id, **fields)
 
 
 def _event_value(

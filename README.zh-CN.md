@@ -32,6 +32,10 @@ Alpha runtime。当前仓库是独立 Python 项目，不依赖 Node 或 pnpm。
 - 工具名刚出现时就用最近参数提前推测
 - 参数流结束后发现猜错时取消错误的进行中任务
 - 命中率过低时自适应暂停新的推测
+- 进行中推测数量上限，避免抢占真实工具调用资源
+- 本地 `ToolRegistry`，可以直接注册和执行真实 Python 函数
+- 可选 OpenAI Responses 与 LangGraph 适配器
+- JSONL trace 与 predictor 状态持久化
 - 更完整的运行时统计：resolved、cancelled、wasted、paused
 - 异步推测执行器
 - `before_execute` / `after_execute` 集成钩子
@@ -48,6 +52,7 @@ python -m pip install -e .
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests
 PYTHONPATH=src python demo/smoke.py
+PYTHONPATH=src python demo/registry_quickstart.py
 PYTHONPATH=src python demo/benchmark.py
 ```
 
@@ -103,6 +108,27 @@ asyncio.run(main())
 result = await precog.execute("search", {"q": "python agents"}, tool_executor)
 ```
 
+## 真实工具注册表
+
+独立 Python 应用可以直接用 `ToolRegistry` 做工具分发：
+
+```python
+from precog import IdempotencyClass, PreCog, ToolRegistry
+
+registry = ToolRegistry()
+
+
+@registry.register(idempotency_class=IdempotencyClass.NETWORK_READ, timeout_seconds=3)
+def search(q: str) -> dict[str, str]:
+    return {"query": q}
+
+
+precog = PreCog(**registry.precog_kwargs())
+result = await precog.execute("search", {"q": "agent latency"}, registry.execute)
+```
+
+同步函数默认会放进 worker thread 执行，避免推测执行阻塞事件循环。
+
 ## 运行时控制
 
 默认配置足够激进，可以更早抢跑工具调用，同时保留保护栏：
@@ -115,12 +141,62 @@ precog = PreCog(
     adaptive_min_calls=20,
     adaptive_min_hit_rate=0.2,
     adaptive_cooldown_seconds=30,
+    max_concurrent_speculations=8,
 )
 ```
 
 - `predict_on_tool_start` 会在模型刚输出工具名时就开始推测，参数使用该工具最近一次观察到的参数。
 - 如果后续流式参数与猜测参数不一致，错误的进行中任务会被取消，并计入 wasted speculation。
 - 自适应保护会在观测命中率低于 `adaptive_min_hit_rate` 时临时暂停新的推测。
+- `max_concurrent_speculations` 限制同时进行的推测任务数量，避免无限抢占资源。
+
+## 集成
+
+### OpenAI Responses streaming
+
+```python
+from precog.adapters.openai import OpenAIResponsesAdapter
+
+adapter = OpenAIResponsesAdapter()
+
+for event in stream:
+    for model_event in adapter.events_from(event):
+        await precog.observe_model_event(model_event)
+```
+
+这个适配器会把 function-call 参数流转换成 PreCog 的通用 `ModelEvent`。
+
+### LangGraph ToolNode
+
+```python
+from langgraph.prebuilt import ToolNode
+from precog.adapters.langgraph import make_langgraph_tool_wrappers
+
+tool_node = ToolNode(
+    tools,
+    **make_langgraph_tool_wrappers(precog),
+)
+```
+
+wrapper 会先调用 `before_execute`，命中时直接返回缓存的 ToolNode 结果；
+未命中时正常执行工具，并在 `after_execute` 中写入缓存。
+
+## 运维
+
+```python
+from precog import JsonlTraceSink
+
+precog = PreCog(
+    **registry.precog_kwargs(),
+    trace_sink=JsonlTraceSink("logs/precog.jsonl"),
+)
+
+precog.save_state("precog-state.json")
+precog.load_state("precog-state.json")
+await precog.close(cancel=True)
+```
+
+这一版的调研依据和设计取舍见 [research notes](docs/research-notes.md)。
 
 ## 安全模型
 
