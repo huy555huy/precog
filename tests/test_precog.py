@@ -100,6 +100,121 @@ class PreCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(precog.config().stats.speculations_launched, 1)
         self.assertEqual(precog.config().stats.speculations_resolved, 1)
 
+    async def test_tool_start_speculation_uses_recent_args(self) -> None:
+        calls: list[tuple[str, Mapping[str, Any]]] = []
+
+        async def executor(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+            calls.append((tool_name, dict(args)))
+            await asyncio.sleep(0.01)
+            return {"from": "tool_start", "tool": tool_name, "args": dict(args)}
+
+        precog = PreCog(read_only_tools={"search"}, executor=executor)
+        args = {"q": "agent runtime"}
+
+        await precog.before_execute("search", args, call_id="seed")
+        await precog.after_execute("search", args, {"seed": True}, call_id="seed")
+        precog.cache.clear()
+
+        await precog.observe_model_event(
+            {"type": "tool_call_start", "callId": "c1", "toolName": "search"}
+        )
+        await asyncio.sleep(0)
+        await precog.observe_model_event(
+            {
+                "type": "tool_call_args_delta",
+                "callId": "c1",
+                "delta": json.dumps(args),
+            }
+        )
+        await precog.observe_model_event({"type": "tool_call_end", "callId": "c1"})
+
+        decision = await precog.before_execute("search", args, call_id="c1")
+
+        self.assertEqual(decision.type, "provide_result")
+        self.assertEqual(decision.result["from"], "tool_start")
+        self.assertEqual(calls, [("search", args)])
+        self.assertEqual(precog.config().stats.tool_start_speculations, 1)
+        self.assertEqual(precog.config().stats.speculations_launched, 0)
+
+    async def test_wrong_tool_start_guess_is_cancelled(self) -> None:
+        calls: list[tuple[str, Mapping[str, Any]]] = []
+        cancelled: list[Mapping[str, Any]] = []
+
+        async def executor(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+            calls.append((tool_name, dict(args)))
+            try:
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                cancelled.append(dict(args))
+                raise
+            return {"tool": tool_name, "args": dict(args)}
+
+        precog = PreCog(read_only_tools={"search"}, executor=executor)
+        old_args = {"q": "old"}
+        new_args = {"q": "new"}
+
+        await precog.before_execute("search", old_args, call_id="seed")
+        await precog.after_execute("search", old_args, {"seed": True}, call_id="seed")
+        precog.cache.clear()
+
+        await precog.observe_model_event(
+            {"type": "tool_call_start", "callId": "c1", "toolName": "search"}
+        )
+        await asyncio.sleep(0)
+        await precog.observe_model_event(
+            {
+                "type": "tool_call_args_delta",
+                "callId": "c1",
+                "delta": json.dumps(new_args),
+            }
+        )
+        await precog.observe_model_event({"type": "tool_call_end", "callId": "c1"})
+
+        decision = await precog.before_execute("search", new_args, call_id="c1")
+
+        self.assertEqual(decision.type, "provide_result")
+        self.assertEqual(decision.result["args"], new_args)
+        self.assertEqual(cancelled, [old_args])
+        self.assertEqual(calls, [("search", old_args), ("search", new_args)])
+        self.assertEqual(precog.config().stats.wasted_speculations, 1)
+        self.assertEqual(precog.config().stats.speculations_cancelled, 1)
+
+    async def test_adaptive_pause_stops_new_speculations_after_misses(self) -> None:
+        calls: list[tuple[str, Mapping[str, Any]]] = []
+
+        async def executor(tool_name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+            calls.append((tool_name, dict(args)))
+            return {"tool": tool_name, "args": dict(args)}
+
+        precog = PreCog(
+            read_only_tools={"search"},
+            executor=executor,
+            adaptive_min_calls=2,
+            adaptive_min_hit_rate=0.5,
+            adaptive_cooldown_seconds=60,
+        )
+
+        await precog.before_execute("search", {"q": "a"}, call_id="c1")
+        await precog.before_execute("search", {"q": "b"}, call_id="c2")
+        await precog.observe_model_event(
+            {"type": "tool_call_start", "callId": "c3", "toolName": "search"}
+        )
+        await precog.observe_model_event(
+            {
+                "type": "tool_call_args_delta",
+                "callId": "c3",
+                "delta": json.dumps({"q": "c"}),
+            }
+        )
+        await precog.observe_model_event({"type": "tool_call_end", "callId": "c3"})
+
+        config = precog.config()
+        self.assertTrue(config.speculation_paused)
+        self.assertEqual(config.stats.adaptive_pauses, 1)
+        self.assertEqual(config.stats.speculations_launched, 0)
+        self.assertEqual(config.stats.tool_start_speculations, 0)
+        self.assertEqual(calls, [])
+
     async def test_execute_wrapper_runs_real_tool_then_hits_cache(self) -> None:
         executions = 0
 
@@ -119,4 +234,3 @@ class PreCogTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

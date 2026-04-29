@@ -50,6 +50,11 @@ class PreCogConfig:
     read_only_tools: tuple[str, ...]
     speculative_execution: bool
     fuzzy_threshold: float
+    predict_on_tool_start: bool
+    adaptive_min_calls: int
+    adaptive_min_hit_rate: float
+    adaptive_cooldown_seconds: float
+    speculation_paused: bool
     stats: PreCogStats
     hit_rate: float
     cache_size: int
@@ -81,11 +86,21 @@ class PreCog:
         min_observations: int = 1,
         args_window: int = 8,
         fuzzy_threshold: float = 0.7,
+        predict_on_tool_start: bool = True,
+        adaptive_min_calls: int = 20,
+        adaptive_min_hit_rate: float = 0.2,
+        adaptive_cooldown_seconds: float = 30.0,
         executor: SpeculativeExecutor | None = None,
         verbose: bool = False,
     ) -> None:
         if not 0 <= fuzzy_threshold <= 1:
             raise ValueError("fuzzy_threshold must be between 0 and 1")
+        if adaptive_min_calls < 0:
+            raise ValueError("adaptive_min_calls must be >= 0")
+        if not 0 <= adaptive_min_hit_rate <= 1:
+            raise ValueError("adaptive_min_hit_rate must be between 0 and 1")
+        if adaptive_cooldown_seconds < 0:
+            raise ValueError("adaptive_cooldown_seconds must be >= 0")
 
         self.id = id
         self.read_only_tools = tuple(read_only_tools)
@@ -104,12 +119,18 @@ class PreCog:
         )
         self.stats = StatsCollector()
         self.fuzzy_threshold = fuzzy_threshold
+        self.predict_on_tool_start = predict_on_tool_start
+        self.adaptive_min_calls = adaptive_min_calls
+        self.adaptive_min_hit_rate = adaptive_min_hit_rate
+        self.adaptive_cooldown_seconds = adaptive_cooldown_seconds
         self.executor = executor
         self.verbose = verbose
 
         self._args_buffer: dict[str, _ArgsBufferEntry] = {}
         self._inflight_speculations: dict[str, asyncio.Task[None]] = {}
+        self._call_speculation_keys: dict[str, set[str]] = {}
         self._inflight_start: dict[str, float] = {}
+        self._speculation_paused_until = 0.0
 
     async def observe_model_event(self, event: ModelEvent | Mapping[str, Any]) -> None:
         """Observe a streamed model event.
@@ -129,6 +150,15 @@ class PreCog:
                 return
             self.stats.bump("observed_tool_starts")
             self._args_buffer[call_id] = _ArgsBufferEntry(tool_name=tool_name)
+            if self.predict_on_tool_start:
+                guessed_args = self.predictor.guess_args(tool_name)
+                if guessed_args is not None:
+                    self._try_start_speculation(
+                        tool_name,
+                        guessed_args,
+                        "tool_start",
+                        call_id=call_id,
+                    )
             return
 
         if event_type == "tool_call_args_delta":
@@ -151,7 +181,17 @@ class PreCog:
             if not isinstance(args, Mapping):
                 self._log(f"spec SKIP tool={entry.tool_name} reason=args_not_object")
                 return
-            self._try_start_speculation(entry.tool_name, dict(args), "in_stream")
+            normalized_args = dict(args)
+            self._cancel_wrong_call_speculations(
+                call_id,
+                cache_key(entry.tool_name, normalized_args),
+            )
+            self._try_start_speculation(
+                entry.tool_name,
+                normalized_args,
+                "in_stream",
+                call_id=call_id,
+            )
 
     async def before_execute(
         self,
@@ -181,6 +221,7 @@ class PreCog:
                     f"cache HIT strict call_id={call_id} tool={tool_name} "
                     f"saved~={strict.observed_latency_ms:.0f}ms"
                 )
+                self._maybe_pause_speculation()
                 self._observe_and_cross_predict(tool_name, normalized_args)
                 return PreCogDecision(type="provide_result", result=strict.result)
 
@@ -199,11 +240,13 @@ class PreCog:
                         f"cache HIT fuzzy={similarity:.2f} call_id={call_id} "
                         f"tool={tool_name} saved~={entry.observed_latency_ms:.0f}ms"
                     )
+                    self._maybe_pause_speculation()
                     self._observe_and_cross_predict(tool_name, normalized_args)
                     return PreCogDecision(type="provide_result", result=entry.result)
 
         self.stats.bump("cache_misses")
         self._inflight_start[call_id] = time.monotonic()
+        self._maybe_pause_speculation()
         self._log(f"cache MISS call_id={call_id} tool={tool_name}")
         return PreCogDecision(type="allow")
 
@@ -269,6 +312,11 @@ class PreCog:
             read_only_tools=self.read_only_tools,
             speculative_execution=self.executor is not None,
             fuzzy_threshold=self.fuzzy_threshold,
+            predict_on_tool_start=self.predict_on_tool_start,
+            adaptive_min_calls=self.adaptive_min_calls,
+            adaptive_min_hit_rate=self.adaptive_min_hit_rate,
+            adaptive_cooldown_seconds=self.adaptive_cooldown_seconds,
+            speculation_paused=self._is_speculation_paused(),
             stats=self.stats.snapshot(),
             hit_rate=self.stats.hit_rate(),
             cache_size=self.cache.size(),
@@ -300,11 +348,15 @@ class PreCog:
         self,
         tool_name: str,
         args: Mapping[str, Any],
-        source: Literal["in_stream", "cross_turn"],
+        source: Literal["tool_start", "in_stream", "cross_turn"],
+        *,
+        call_id: str | None = None,
     ) -> None:
         if self.executor is None:
             return
         if not self.idempotency.is_safe_for_speculation(tool_name):
+            return
+        if self._is_speculation_paused():
             return
 
         normalized_args = dict(args)
@@ -314,7 +366,9 @@ class PreCog:
         if key in self._inflight_speculations:
             return
 
-        if source == "in_stream":
+        if source == "tool_start":
+            self.stats.bump("tool_start_speculations")
+        elif source == "in_stream":
             self.stats.bump("speculations_launched")
         else:
             self.stats.bump("cross_turn_speculations")
@@ -324,6 +378,8 @@ class PreCog:
             self._run_speculation(key, tool_name, normalized_args),
         )
         self._inflight_speculations[key] = task
+        if call_id is not None:
+            self._call_speculation_keys.setdefault(call_id, set()).add(key)
 
     async def _run_speculation(
         self,
@@ -346,10 +402,47 @@ class PreCog:
             )
             self.stats.bump("speculations_resolved")
             self._log(f"spec RESOLVED tool={tool_name} took={elapsed_ms:.0f}ms")
+        except asyncio.CancelledError:
+            self.stats.bump("speculations_cancelled")
+            self._log(f"spec CANCELLED tool={tool_name}")
+            raise
         except Exception as exc:  # pragma: no cover - defensive logging path.
             self._log(f"spec FAILED tool={tool_name} err={exc!r}")
         finally:
             self._inflight_speculations.pop(key, None)
+
+    def _cancel_wrong_call_speculations(self, call_id: str, actual_key: str) -> None:
+        keys = self._call_speculation_keys.pop(call_id, set())
+        for key in keys:
+            if key == actual_key:
+                continue
+            self.stats.bump("wasted_speculations")
+            task = self._inflight_speculations.get(key)
+            if task is not None and not task.done():
+                task.cancel()
+
+    def _is_speculation_paused(self) -> bool:
+        return time.monotonic() < self._speculation_paused_until
+
+    def _maybe_pause_speculation(self) -> None:
+        if self.adaptive_min_calls == 0:
+            return
+        if self._is_speculation_paused():
+            return
+        total = self.stats.stats.cache_hits + self.stats.stats.cache_misses
+        if total < self.adaptive_min_calls:
+            return
+        if self.stats.hit_rate() >= self.adaptive_min_hit_rate:
+            return
+        paused_until = time.monotonic() + self.adaptive_cooldown_seconds
+        if paused_until > self._speculation_paused_until:
+            self._speculation_paused_until = paused_until
+            self.stats.bump("adaptive_pauses")
+            self._log(
+                "spec PAUSED "
+                f"hit_rate={self.stats.hit_rate():.2f} "
+                f"cooldown={self.adaptive_cooldown_seconds:.0f}s"
+            )
 
     def _log(self, message: str) -> None:
         if self.verbose:
@@ -369,4 +462,3 @@ def _event_value(
     if camel_name and camel_name in event:
         return event[camel_name]
     return default
-

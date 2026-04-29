@@ -20,7 +20,7 @@ PreCog 会直接返回提前执行好的结果。
 
 ## 状态
 
-早期 MVP。当前仓库已经是独立 Python 项目，不再依赖 Node 或 pnpm。
+Alpha runtime。当前仓库是独立 Python 项目，不依赖 Node 或 pnpm。
 
 已实现：
 
@@ -29,6 +29,10 @@ PreCog 会直接返回提前执行好的结果。
 - 带 TTL/LRU 的推测结果缓存
 - token-Jaccard 模糊命中回退
 - 带最近参数记忆的 bigram 工具预测器
+- 工具名刚出现时就用最近参数提前推测
+- 参数流结束后发现猜错时取消错误的进行中任务
+- 命中率过低时自适应暂停新的推测
+- 更完整的运行时统计：resolved、cancelled、wasted、paused
 - 异步推测执行器
 - `before_execute` / `after_execute` 集成钩子
 - smoke demo、合成 benchmark 和 unittest 测试套件
@@ -98,6 +102,25 @@ asyncio.run(main())
 ```python
 result = await precog.execute("search", {"q": "python agents"}, tool_executor)
 ```
+
+## 运行时控制
+
+默认配置足够激进，可以更早抢跑工具调用，同时保留保护栏：
+
+```python
+precog = PreCog(
+    read_only_tools={"search", "fetch_url"},
+    executor=tool_executor,
+    predict_on_tool_start=True,
+    adaptive_min_calls=20,
+    adaptive_min_hit_rate=0.2,
+    adaptive_cooldown_seconds=30,
+)
+```
+
+- `predict_on_tool_start` 会在模型刚输出工具名时就开始推测，参数使用该工具最近一次观察到的参数。
+- 如果后续流式参数与猜测参数不一致，错误的进行中任务会被取消，并计入 wasted speculation。
+- 自适应保护会在观测命中率低于 `adaptive_min_hit_rate` 时临时暂停新的推测。
 
 ## 安全模型
 

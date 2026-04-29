@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "precog"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python-first speculative tool execution for agent runtimes."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,9 +24,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/huy/precog"
-Repository = "https://github.com/huy/precog"
+Homepage = "https://github.com/huy555huy/precog"
+Repository = "https://github.com/huy555huy/precog"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

@@ -20,7 +20,7 @@ the agent tool layer:
 
 ## Status
 
-Early MVP. This repo is now independent Python code with no Node or pnpm
+Alpha runtime. This repo is independent Python code with no Node or pnpm
 dependency.
 
 Implemented:
@@ -30,6 +30,10 @@ Implemented:
 - TTL/LRU speculation cache
 - token-Jaccard fuzzy fallback
 - bigram predictor with recent-argument memory
+- tool-name-stage speculation with guessed recent args
+- cancellation for wrong in-flight guesses
+- adaptive pause when cache hit-rate drops too low
+- richer runtime stats for resolved, cancelled, wasted, and paused work
 - async speculative executor
 - `before_execute` / `after_execute` integration hooks
 - smoke demo, synthetic benchmark, and unittest suite
@@ -100,6 +104,29 @@ convenience wrapper:
 ```python
 result = await precog.execute("search", {"q": "python agents"}, tool_executor)
 ```
+
+## Runtime Controls
+
+The default settings are aggressive enough to show latency wins, but still keep
+guardrails on:
+
+```python
+precog = PreCog(
+    read_only_tools={"search", "fetch_url"},
+    executor=tool_executor,
+    predict_on_tool_start=True,
+    adaptive_min_calls=20,
+    adaptive_min_hit_rate=0.2,
+    adaptive_cooldown_seconds=30,
+)
+```
+
+- `predict_on_tool_start` starts speculation as soon as the model names a tool,
+  using that tool's most recently observed arguments.
+- if streamed arguments later disagree with the guessed args, the wrong
+  in-flight task is cancelled and counted as wasted speculation.
+- the adaptive guard pauses new speculation temporarily when the observed
+  hit-rate falls below `adaptive_min_hit_rate`.
 
 ## Safety Model
 
